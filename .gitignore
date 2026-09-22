@@ -1,0 +1,18 @@
+# Python
+.venv/
+backend/.venv/
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+dist/
+dist-electron/
+
+# Данные и аудио backend
+backend/tmp_audio/
+backend/data/*.db
+backend/logs/
+
+# Окружение
+.env

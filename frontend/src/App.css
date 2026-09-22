@@ -1,0 +1,20 @@
+.app {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  place-content: center;
+  place-items: center;
+  flex-grow: 1;
+  text-align: center;
+}
+
+.app h1 {
+  margin: 0;
+  font-size: 48px;
+}
+
+.app p {
+  margin: 0;
+  font-size: 20px;
+  color: var(--accent);
+}
