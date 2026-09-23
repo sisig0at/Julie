@@ -1,20 +1,237 @@
-.app {
+/* Корень оверлея: орб прижат вправо, чат-панель слева от него. */
+.overlay-root {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 16px;
+  width: 100%;
+  height: 100%;
+  padding: 20px;
+}
+
+/* ---------- Орб ---------- */
+.orb {
+  flex: 0 0 auto;
+  width: 140px;
+  height: 140px;
+  padding: 0;
+  border: 1px solid rgba(139, 124, 246, 0.35);
+  border-radius: 50%;
+  background: var(--glass-bg);
+  box-shadow:
+    0 0 24px rgba(139, 124, 246, 0.35),
+    0 8px 24px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+}
+
+.orb:hover {
+  border-color: rgba(139, 124, 246, 0.7);
+}
+
+.orb-equalizer {
+  display: block;
+}
+
+/* Бар управляется CSS-трансформом; rotate задаётся атрибутом на родителе <g>. */
+.orb-bar {
+  transform-box: fill-box;
+  transform-origin: top;
+}
+
+@keyframes orb-pulse {
+  0%,
+  100% {
+    transform: scaleY(0.2);
+    opacity: 0.75;
+  }
+  50% {
+    transform: scaleY(0.35);
+    opacity: 1;
+  }
+}
+
+/* idle: спокойная пульсация 1.6s, thinking: та же, но быстрее 0.9s */
+.orb-bar--idle {
+  animation: orb-pulse 1.6s ease-in-out infinite;
+}
+
+.orb-bar--thinking {
+  animation: orb-pulse 0.9s ease-in-out infinite;
+}
+
+/* Под орбом — русская подпись статуса (слушаю/думаю/говорю). */
+.orb-wrap {
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  place-content: center;
-  place-items: center;
-  flex-grow: 1;
+  align-items: center;
+  gap: 8px;
+}
+
+.orb-status {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  transition: opacity 200ms ease-out;
+}
+
+.orb-status--hidden {
+  opacity: 0;
+}
+
+/* ---------- Чат-панель ---------- */
+.chat-panel {
+  flex: 0 0 auto;
+  width: 360px;
+  height: 480px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(139, 124, 246, 0.25);
+  background: var(--glass-bg-strong);
+  box-shadow:
+    0 0 18px rgba(139, 124, 246, 0.18),
+    0 12px 32px rgba(0, 0, 0, 0.45);
+  transition:
+    transform 200ms ease-out,
+    opacity 200ms ease-out;
+}
+
+.chat-panel--open {
+  transform: translateX(0);
+  opacity: 1;
+}
+
+.chat-panel--closed {
+  transform: translateX(-32px);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.chat-panel__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.chat-panel__title {
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: 0.04em;
+  color: var(--text-primary);
+}
+
+.chat-panel__status {
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.chat-panel__messages {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.bubble {
+  max-width: 88%;
+  padding: 8px 12px;
+  border-radius: 12px;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-primary);
+}
+
+.bubble.user {
+  align-self: flex-end;
+  background: rgba(139, 124, 246, 0.18);
+}
+
+.bubble.assistant {
+  align-self: flex-start;
+  background: rgba(79, 209, 197, 0.12);
+}
+
+.bubble.system {
+  align-self: center;
+  max-width: 100%;
+  background: transparent;
+  color: #e05d5d;
+  font-size: 12px;
   text-align: center;
 }
 
-.app h1 {
-  margin: 0;
-  font-size: 48px;
+/* Подпись под ответом: мозг и причина fallback */
+.bubble .meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 6px;
 }
 
-.app p {
-  margin: 0;
-  font-size: 20px;
-  color: var(--accent);
+.bubble .brain-tag {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
 }
+
+.bubble .fallback-reason {
+  font-size: 10px;
+  font-weight: 400;
+  color: #b07d2a;
+}
+
+.chat-panel__composer {
+  display: flex;
+  gap: 8px;
+}
+
+.chat-panel__composer input {
+  flex: 1;
+  padding: 8px 10px;
+  font-size: 14px;
+  font-weight: 400;
+  border: 1px solid rgba(140, 143, 163, 0.35);
+  border-radius: 10px;
+  background: rgba(16, 18, 28, 0.55);
+  color: var(--text-primary);
+}
+
+.chat-panel__composer input::placeholder {
+  color: var(--text-muted);
+}
+
+.chat-panel__composer button {
+  padding: 8px 14px;
+  font-size: 14px;
+  border: none;
+  border-radius: 10px;
+  background: var(--accent-violet);
+  color: #10121c;
+  cursor: pointer;
+}
+
+.chat-panel__composer button:disabled,
+.chat-panel__composer input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+

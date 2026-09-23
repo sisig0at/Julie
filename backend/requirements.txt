@@ -2,3 +2,6 @@ fastapi==0.115.*
 uvicorn[standard]==0.32.*
 python-dotenv==1.0.*
 websockets==13.*
+httpx==0.28.*
+faster-whisper==1.2.*
+piper-tts==1.8.*

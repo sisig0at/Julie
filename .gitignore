@@ -12,6 +12,7 @@ dist-electron/
 # Данные и аудио backend
 backend/tmp_audio/
 backend/data/*.db
+backend/data/piper/
 backend/logs/
 
 # Окружение

@@ -1,11 +1,23 @@
 // Главный процесс Electron: поднимает Vite dev-сервер и грузит React-приложение.
 
-import { app, BrowserWindow } from "electron";
+import { app, BrowserWindow, globalShortcut, screen, session } from "electron";
 import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 // Адрес dev-сервера Vite (порт по умолчанию).
 const DEV_SERVER_URL: string = "http://localhost:5173";
+
+// Глобальный хоткей переключения записи голоса (Ctrl+Space).
+const VOICE_SHORTCUT: string = "CommandOrControl+Space";
+
+// Сборка preload: .cts компилируется в CommonJS (.cjs) — sandboxed-преload
+// Electron не умеет грузить ESM, поэтому расширение именно такое.
+const PRELOAD_PATH: string = fileURLToPath(new URL("./preload.cjs", import.meta.url));
+
+// Фиксированный размер окна: чат (360) + орб (140) + отступы (20*2) + зазор (16),
+// высота — чат (480) + отступы (20*2). Меняем только через CSS-видимость чата.
+const WINDOW_WIDTH: number = 556;
+const WINDOW_HEIGHT: number = 520;
 
 // Сколько ждать ответа от dev-сервера, мс.
 const STARTUP_TIMEOUT_MS: number = 30_000;
@@ -105,16 +117,54 @@ async function createWindow(): Promise<void> {
     }
 
     const window: BrowserWindow = new BrowserWindow({
-        width: 1200,
-        height: 800,
+        width: WINDOW_WIDTH,
+        height: WINDOW_HEIGHT,
+        transparent: true,
+        frame: false,
+        alwaysOnTop: true,
+        resizable: false,
+        hasShadow: false,
         title: "Julie",
+        webPreferences: {
+            preload: PRELOAD_PATH,
+        },
     });
+
+    // Глобальный хоткей: переключает запись голоса (уведомляет renderer).
+    const shortcutRegistered: boolean = globalShortcut.register(VOICE_SHORTCUT, () => {
+        if (!window.isDestroyed()) {
+            window.webContents.send("voice:toggle");
+        }
+    });
+    if (!shortcutRegistered) {
+        console.error(
+            `Хоткей ${VOICE_SHORTCUT} занят другим приложением — запись голоса будет недоступна.`,
+        );
+    }
+
+    // Позиция — верхний правый угол рабочей области основного монитора.
+    const workArea = screen.getPrimaryDisplay().workArea;
+    window.setBounds({
+        x: workArea.x + workArea.width - WINDOW_WIDTH,
+        y: workArea.y,
+        width: WINDOW_WIDTH,
+        height: WINDOW_HEIGHT,
+    });
+
     await window.loadURL(DEV_SERVER_URL);
 }
 
 // Приложение готово — создаём окно; при сбое выходим с ошибкой в консоль.
 app.whenReady().then(
     () => {
+        // Разрешаем renderer доступ к микрофону (запись голоса); прочие
+        // разрешения (камера, уведомления...) по умолчанию отклоняем.
+        session.defaultSession.setPermissionRequestHandler(
+            (_webContents, permission, callback) => {
+                callback(permission === "media");
+            },
+        );
+
         createWindow().catch((error: unknown) => {
             const message: string = error instanceof Error ? error.message : String(error);
             console.error(message);
@@ -133,8 +183,9 @@ app.on("window-all-closed", () => {
     app.quit();
 });
 
-// Перед завершением останавливаем дочерний Vite.
+// Перед завершением останавливаем дочерний Vite и снимаем глобальные хоткеи.
 app.on("before-quit", () => {
+    globalShortcut.unregisterAll();
     if (viteProcess !== null) {
         stopVite(viteProcess.pid);
         viteProcess = null;
