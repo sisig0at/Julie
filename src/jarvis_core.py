@@ -8,7 +8,7 @@ import webbrowser
 import base64
 
 import edge_tts
-from openai import OpenAI
+from openai import OpenAI, APIConnectionError, APIStatusError
 
 import platform_ops
 import config as app_config
@@ -33,7 +33,12 @@ def reload_client():
     ACTIVE_MODEL = CONFIG.active_model()
     ACTIVE_VISION_MODEL = CONFIG.active_vision_model()
     api_key = CONFIG.data.get("api_key", "").strip()
-    if ACTIVE_PROVIDER == "openrouter":
+    if ACTIVE_PROVIDER == "ollama":
+        # Ollama serves an OpenAI-compatible API locally and ignores auth,
+        # but the client still requires some non-empty key value.
+        base_url = app_config.OLLAMA_BASE_URL
+        api_key = "ollama"
+    elif ACTIVE_PROVIDER == "openrouter":
         base_url = "https://openrouter.ai/api/v1"
     else:
         base_url = "https://api.groq.com/openai/v1"
@@ -42,6 +47,31 @@ def reload_client():
 
 
 reload_client()
+
+
+# --- Ollama-specific failures: explain them instead of failing silently ---
+OLLAMA_BASE_HINT = "Ollama is not reachable at http://localhost:11434."
+
+
+def ollama_error_message(err: Exception) -> str:
+    """Human-readable message for local Ollama problems, or "" for errors that
+    are not Ollama-availability issues (so normal error handling stays intact)."""
+    if isinstance(err, APIConnectionError):
+        return (
+            f"{OLLAMA_BASE_HINT} Start it with 'ollama serve' and pull a model "
+            f"(e.g. 'ollama pull llama3.2'), then try again."
+        )
+    if isinstance(err, APIStatusError) and err.status_code == 404:
+        return (
+            f"Ollama model '{ACTIVE_MODEL}' is not available locally. "
+            f"Pull it with 'ollama pull {ACTIVE_MODEL}' and try again."
+        )
+    low = str(err).lower()
+    if any(t in low for t in ("connection refused", "econnrefused", "11434",
+                              "failed to establish a new connection", "max retries exceeded")):
+        return f"{OLLAMA_BASE_HINT} Start it with 'ollama serve' and try again."
+    return ""
+
 
 AUDIO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "audio")
 os.makedirs(AUDIO_DIR, exist_ok=True)
@@ -529,6 +559,14 @@ async def fetch_ai_response(user_prompt: str) -> str:
         STATUS["last_ts"] = time.time()
         return cleaned_reply
     except Exception as e:
+        # Ollama runs locally: explain availability problems instead of
+        # returning a generic (silent) connection error.
+        if ACTIVE_PROVIDER == "ollama":
+            ollama_msg = ollama_error_message(e)
+            if ollama_msg:
+                print(f"❌ Ollama Error: {e}")
+                set_status("error", "ollama unavailable")
+                return ollama_msg
         err_str = str(e)
         if "tool_use_failed" in err_str or "failed_generation" in err_str:
             print("🔄 Tool call parsing failed, recovering from emitted call...")

@@ -6,6 +6,17 @@ import time
 import threading
 from pathlib import Path
 
+# Windows consoles default to a legacy codepage (e.g. cp1251) which crashes
+# every emoji/status print; force UTF-8 before importing the logging-heavy
+# modules below. Electron already sets PYTHONUTF8 for its own spawn, this
+# covers running the backend directly (run.sh / manual start).
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 import speech_recognition as sr
 
 from fastapi import FastAPI
@@ -15,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import jarvis_core as core
+import config as app_config
 
 # Single source of truth: core owns the config; server must share that same
 # instance or saves from the UI would never reach the chat/tools layer.
@@ -137,6 +149,7 @@ class ConfigRequest(BaseModel):
     api_key: str | None = None
     model: str | None = None
     openrouter_model: str | None = None
+    ollama_model: str | None = None
 
 
 @app.get("/api/health")
@@ -156,16 +169,54 @@ async def save_config(req: ConfigRequest):
         api_key=req.api_key,
         model=req.model,
         openrouter_model=req.openrouter_model,
+        ollama_model=req.ollama_model,
     )
     core.reload_client()
     return cfg
 
 
 _models_cache = {"ts": 0.0, "models": []}
+_ollama_cache = {"ts": 0.0, "models": [], "reachable": False, "error": ""}
+
+
+def _fetch_ollama_models() -> dict:
+    """List the models pulled into the local Ollama service (short cache).
+    Returns reachable=False with a hint when localhost:11434 is down."""
+    if time.time() - _ollama_cache["ts"] < 10 and _ollama_cache["models"]:
+        return {
+            "models": _ollama_cache["models"],
+            "reachable": _ollama_cache["reachable"],
+            "error": _ollama_cache["error"],
+        }
+
+    models, reachable, error = [], False, ""
+    try:
+        import urllib.request, json as _json
+        with urllib.request.urlopen(app_config.OLLAMA_API_TAGS, timeout=3) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+        for m in data.get("models", []):
+            name = m.get("name") or m.get("model") or ""
+            if name:
+                models.append({"id": name, "name": name})
+        models.sort(key=lambda m: m["id"])
+        reachable = True
+    except Exception as e:
+        print(f"⚠️ Ollama model fetch failed: {e}")
+        error = (f"Ollama is not reachable at {app_config.OLLAMA_BASE_URL.rsplit('/v1', 1)[0]}. "
+                 "Start it with 'ollama serve' and pull a model (e.g. 'ollama pull llama3.2').")
+
+    _ollama_cache.update(ts=time.time(), models=models, reachable=reachable, error=error)
+    return {
+        "models": models or [{"id": m, "name": m} for m in app_config.OLLAMA_FALLBACK_MODELS],
+        "reachable": reachable,
+        "error": error,
+    }
 
 
 @app.get("/api/models")
 async def get_models(provider: str = "groq"):
+    if provider == "ollama":
+        return _fetch_ollama_models()
     if provider == "openrouter":
         # Live fetch with a short cache so the UI dropdown is fresh but snappy
         if time.time() - _models_cache["ts"] > 300 or not _models_cache["models"]:

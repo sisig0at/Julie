@@ -84,9 +84,10 @@
         <select id="cfg-provider">
           <option value="groq">Groq</option>
           <option value="openrouter">OpenRouter</option>
+          <option value="ollama">Ollama (local)</option>
         </select>
       </div>
-      <div class="form-row">
+      <div class="form-row" id="cfg-key-row">
         <label for="cfg-key">API&nbsp;KEY</label>
         <div class="key-row">
           <input id="cfg-key" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false">
@@ -102,6 +103,11 @@
         <label for="cfg-model-or">MODEL&nbsp;(OPENROUTER)</label>
         <input id="cfg-model-or" list="cfg-model-or-list" placeholder="type or pick a model" autocomplete="off" spellcheck="false">
         <datalist id="cfg-model-or-list"></datalist>
+      </div>
+      <div class="form-row hidden" id="cfg-model-row-ollama">
+        <label for="cfg-model-ollama">MODEL&nbsp;(OLLAMA)</label>
+        <input id="cfg-model-ollama" list="cfg-model-ollama-list" placeholder="type or pick a model" autocomplete="off" spellcheck="false">
+        <datalist id="cfg-model-ollama-list"></datalist>
       </div>
       <div class="modal-actions">
         <span id="cfg-status" class="modal-status"></span>

@@ -319,18 +319,24 @@ const settingsOverlay = $('settings-overlay');
 const settingsHint = $('settings-hint');
 const cfgProvider = $('cfg-provider');
 const cfgKey = $('cfg-key');
+const cfgKeyRow = $('cfg-key-row');
 const cfgKeyToggle = $('cfg-key-toggle');
 const cfgModel = $('cfg-model');
 const cfgModelOr = $('cfg-model-or');
+const cfgModelOllama = $('cfg-model-ollama');
 const cfgStatus = $('cfg-status');
 const modelRowGroq = $('cfg-model-row-groq');
 const modelRowOr = $('cfg-model-row-openrouter');
+const modelRowOllama = $('cfg-model-row-ollama');
 const gearBtn = $('btn-settings');
 
+let hintBase = '';
+
 function openSettings(firstRun) {
-  settingsHint.textContent = firstRun
+  hintBase = firstRun
     ? 'No API key detected. Provide a provider and API key to activate JARVIS. Your key is stored locally and never bundled with the app.'
     : 'Update your provider, API key, or model. Your key is stored locally and never bundled with the app.';
+  settingsHint.textContent = hintBase;
   cfgStatus.textContent = '';
   cfgStatus.className = 'modal-status';
   loadSettingsForm();
@@ -344,35 +350,58 @@ function closeSettings() {
 async function loadSettingsForm() {
   try {
     const cfg = await backend.config();
-    cfgProvider.value = cfg.provider === 'openrouter' ? 'openrouter' : 'groq';
+    cfgProvider.value = ['openrouter', 'ollama'].includes(cfg.provider) ? cfg.provider : 'groq';
     cfgKey.value = '';
-    onProviderChange(cfg.provider, cfg);
+    await onProviderChange(cfg.provider, cfg);
   } catch {
     cfgStatus.textContent = 'CONFIG UNAVAILABLE';
     cfgStatus.className = 'modal-status error';
   }
 }
 
+function setCfgStatus(text, isError) {
+  cfgStatus.textContent = text;
+  cfgStatus.className = isError ? 'modal-status error' : 'modal-status';
+}
+
 async function onProviderChange(provider, cfg) {
   const isOr = provider === 'openrouter';
-  modelRowGroq.classList.toggle('hidden', isOr);
+  const isOllama = provider === 'ollama';
+  setCfgStatus('', false);
+
+  // Ollama runs locally: no API key field, dedicated model field
+  cfgKeyRow.classList.toggle('hidden', isOllama);
+  modelRowGroq.classList.toggle('hidden', isOr || isOllama);
   modelRowOr.classList.toggle('hidden', !isOr);
-  const target = isOr ? cfgModelOr : cfgModel;
-  const list = isOr ? $('cfg-model-or-list') : $('cfg-model-list');
+  modelRowOllama.classList.toggle('hidden', !isOllama);
+  settingsHint.textContent = isOllama
+    ? 'Ollama runs on your machine, so no API key is needed. The Ollama service must be running on http://localhost:11434.'
+    : hintBase;
+
+  const target = isOr ? cfgModelOr : isOllama ? cfgModelOllama : cfgModel;
+  const list = isOr ? $('cfg-model-or-list') : isOllama ? $('cfg-model-ollama-list') : $('cfg-model-list');
   list.innerHTML = '';
   target.value = '';
   try {
-    const { models } = await backend.models(provider);
-    for (const m of models) {
+    const res = await backend.models(provider);
+    for (const m of res.models) {
       const opt = document.createElement('option');
       opt.value = m.id;
       list.appendChild(opt);
     }
-  } catch {
+    if (isOllama && res.reachable === false) {
+      setCfgStatus(res.error || 'OLLAMA NOT REACHABLE ON localhost:11434', true);
+    } else if (isOllama) {
+      setCfgStatus('', false);
+    }
+  } catch (e) {
     /* datalist stays empty; typing a model id still works */
+    if (isOllama) {
+      setCfgStatus('OLLAMA NOT REACHABLE ON localhost:11434 - RUN `ollama serve`', true);
+    }
   }
   if (cfg) {
-    const saved = isOr ? cfg.openrouter_model : cfg.model;
+    const saved = isOr ? cfg.openrouter_model : isOllama ? cfg.ollama_model : cfg.model;
     if (saved) target.value = saved;
   }
 }
@@ -391,29 +420,38 @@ settingsOverlay.addEventListener('click', (e) => {
 });
 
 $('btn-settings-save').addEventListener('click', async () => {
+  const provider = cfgProvider.value;
+  const isOllama = provider === 'ollama';
   const key = cfgKey.value.trim();
-  if (!key) {
-    cfgStatus.textContent = 'ENTER AN API KEY';
-    cfgStatus.className = 'modal-status error';
+
+  if (!isOllama && !key) {
+    setCfgStatus('ENTER AN API KEY', true);
+    return;
+  }
+  if (isOllama && !cfgModelOllama.value.trim()) {
+    setCfgStatus('ENTER AN OLLAMA MODEL (e.g. llama3.2)', true);
     return;
   }
   const payload = {
-    provider: cfgProvider.value,
-    api_key: key,
+    provider,
     model: cfgModel.value.trim(),
-    openrouter_model: cfgModelOr.value.trim()
+    openrouter_model: cfgModelOr.value.trim(),
+    ollama_model: cfgModelOllama.value.trim()
   };
-  cfgStatus.textContent = 'SAVING...';
-  cfgStatus.className = 'modal-status';
+  // keep the stored key untouched when Ollama (no key) is selected
+  if (!isOllama) payload.api_key = key;
+
+  setCfgStatus('SAVING...', false);
   try {
     await backend.saveConfig(payload);
-    cfgStatus.textContent = 'SAVED';
+    setCfgStatus('SAVED', false);
     cfgKey.value = '';
-    appendMessage('sys', 'CONFIG UPDATED. JARVIS ACTIVATED.');
+    appendMessage('sys', isOllama
+      ? 'CONFIG UPDATED. RUNNING ON LOCAL OLLAMA.'
+      : 'CONFIG UPDATED. JARVIS ACTIVATED.');
     setTimeout(closeSettings, 700);
   } catch (e) {
-    cfgStatus.textContent = 'SAVE FAILED: ' + e.message;
-    cfgStatus.className = 'modal-status error';
+    setCfgStatus('SAVE FAILED: ' + e.message, true);
   }
 });
 

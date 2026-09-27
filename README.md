@@ -3,9 +3,9 @@
 A futuristic HUD voice assistant. Electron UI + Python (FastAPI) backend.
 
 - Voice input (mic), speech output (edge-tts), text chat
-- AI tool use (Groq / OpenRouter, function calling): open/close apps, open websites,
-  volume control, lock screen, screenshots, screen vision, close windows/tabs,
-  web search, find files, current time
+- AI tool use (Groq / OpenRouter / local Ollama, function calling): open/close apps,
+  open websites, volume control, lock screen, screenshots, screen vision,
+  close windows/tabs, web search, find files, current time
 - Cross-platform: Linux + Windows 11
 - Works as an app (Electron) or in a browser (UI served by the backend)
 
@@ -38,13 +38,28 @@ cd ..
 ./run.sh                                   # Windows: run the steps manually
 ```
 
-On first launch the app shows a configuration dialog (Groq or OpenRouter, API key,
-model choice). **The key is stored in the user config dir, never in the repo or exe:**
+On first launch the app shows a configuration dialog (Groq, OpenRouter or Ollama,
+API key, model choice). **The key is stored in the user config dir, never in the repo or exe:**
 
 - Linux:   `~/.config/jarvis/config.json`
 - Windows: `%APPDATA%\Jarvis\config.json`
 
 Click the gear icon (bottom right) any time to change the provider/key/model.
+
+### Local model (Ollama)
+
+Pick provider **Ollama (local)** in the settings dialog - no API key is needed and the
+model list comes from your local `ollama list`. Requirements:
+
+```bash
+ollama serve            # service must run on http://localhost:11434
+ollama pull llama3.2    # any chat model; use a vision model for screen analysis
+```
+
+If the service is not running or the selected model is not pulled, the settings dialog
+and the chat show an actionable error instead of failing silently. Tool-calling uses the
+same OpenAI-compatible format, so the tools work as with Groq/OpenRouter (pick a model
+that supports tools, e.g. `qwen2.5`, `llama3.1`, `llama3.2`, `mistral`).
 
 ## Packaging (installer)
 

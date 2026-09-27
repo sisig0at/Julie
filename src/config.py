@@ -13,13 +13,20 @@ import sys
 APP_NAME = "jarvis"
 
 DEFAULT_CONFIG = {
-    "provider": "groq",          # "groq" | "openrouter"
+    "provider": "groq",          # "groq" | "openrouter" | "ollama"
     "api_key": "",
     "model": "llama-3.3-70b-versatile",       # Groq model
     "openrouter_model": "openai/gpt-4o-mini", # OpenRouter model
+    "ollama_model": "llama3.2",              # Local Ollama model
     "vision_model": "qwen/qwen3.6-27b",       # Groq vision model
     "openrouter_vision": "qwen/qwen2.5-vl-72b-instruct",  # OpenRouter vision
+    "ollama_vision": "llava",                 # Local Ollama vision model
 }
+
+# Ollama exposes an OpenAI-compatible API, so the same client is reused with
+# this base_url and without a real API key.
+OLLAMA_BASE_URL = "http://localhost:11434/v1"
+OLLAMA_API_TAGS = "http://localhost:11434/api/tags"   # native endpoint to list local models
 
 GROQ_MODELS = [
     "llama-3.3-70b-versatile",
@@ -41,6 +48,19 @@ OPENROUTER_FALLBACK_MODELS = [
     "deepseek/deepseek-chat",
     "qwen/qwen-2.5-72b-instruct",
     "mistralai/mistral-small-24b-instruct",
+]
+
+# Shown in the UI when the local Ollama service can't be queried for the
+# models the user actually has pulled.
+OLLAMA_FALLBACK_MODELS = [
+    "llama3.2",
+    "llama3.1",
+    "qwen2.5:7b",
+    "qwen2.5",
+    "mistral",
+    "gemma2",
+    "phi3",
+    "llava",
 ]
 
 
@@ -82,6 +102,8 @@ class AppConfig:
             print(f"⚠️ Config save failed: {e}")
 
     def is_configured(self) -> bool:
+        if self.provider() == "ollama":
+            return True  # local service, no API key required
         return bool(self.data.get("api_key", "").strip())
 
     def provider(self) -> str:
@@ -90,15 +112,20 @@ class AppConfig:
     def active_model(self) -> str:
         if self.provider() == "openrouter":
             return self.data.get("openrouter_model") or DEFAULT_CONFIG["openrouter_model"]
+        if self.provider() == "ollama":
+            return self.data.get("ollama_model") or DEFAULT_CONFIG["ollama_model"]
         return self.data.get("model") or DEFAULT_CONFIG["model"]
 
     def active_vision_model(self) -> str:
         if self.provider() == "openrouter":
             return self.data.get("openrouter_vision") or DEFAULT_CONFIG["openrouter_vision"]
+        if self.provider() == "ollama":
+            return self.data.get("ollama_vision") or DEFAULT_CONFIG["ollama_vision"]
         return self.data.get("vision_model") or DEFAULT_CONFIG["vision_model"]
 
-    def update(self, provider=None, api_key=None, model=None, openrouter_model=None) -> dict:
-        if provider in ("groq", "openrouter"):
+    def update(self, provider=None, api_key=None, model=None, openrouter_model=None,
+               ollama_model=None) -> dict:
+        if provider in ("groq", "openrouter", "ollama"):
             self.data["provider"] = provider
         if api_key is not None:
             self.data["api_key"] = api_key.strip()
@@ -106,6 +133,8 @@ class AppConfig:
             self.data["model"] = model
         if openrouter_model is not None:
             self.data["openrouter_model"] = openrouter_model
+        if ollama_model:
+            self.data["ollama_model"] = ollama_model
         self.save()
         return self.public()
 
@@ -116,4 +145,5 @@ class AppConfig:
             "provider": self.provider(),
             "model": self.data.get("model", ""),
             "openrouter_model": self.data.get("openrouter_model", ""),
+            "ollama_model": self.data.get("ollama_model", ""),
         }
