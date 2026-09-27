@@ -8,6 +8,7 @@ never baked into the code or the packaged exe. Location:
 
 import json
 import os
+import secrets
 import sys
 
 APP_NAME = "jarvis"
@@ -28,6 +29,11 @@ DEFAULT_CONFIG = {
     "cloud_provider": "",       # dual-mode cloud brain: "groq" | "openrouter"
                                 # "" = follow "provider" when it is a cloud one
     "stt_language": "en-US",    # voice input language: "en-US" | "ru-RU"
+    # Bearer token for the local HTTP API. Generated once on first start (by
+    # electron/main.js or by the backend itself when run manually), stored only
+    # in this file, never returned by public() and never sent over HTTP to the
+    # UI - the renderer receives it over IPC instead.
+    "api_token": "",
 }
 
 # --- Speech-to-text language ---
@@ -163,6 +169,34 @@ class AppConfig:
     def stt_language(self) -> str:
         """Recognition language for voice input ("en-US" | "ru-RU")."""
         return normalize_stt_lang(self.data.get("stt_language"))
+
+    def api_token(self) -> str:
+        return str(self.data.get("api_token", "")).strip()
+
+    def ensure_api_token(self) -> str:
+        """Bearer token protecting the local HTTP API.
+
+        Generated once on first run (secrets.token_hex(32)) and persisted in
+        this config file (outside the repository). Deliberately NOT part of
+        public(): the UI gets it from electron/main.js over IPC, never over HTTP.
+        """
+        token = self.api_token()
+        if not token:
+            token = secrets.token_hex(32)
+            self.data["api_token"] = token
+            self.save()
+        return token
+
+    def set_api_token(self, token: str) -> str:
+        """Adopt a token handed in from outside (JARVIS_API_TOKEN set by
+        electron/main.js) so backend and renderer always enforce the same one."""
+        token = str(token or "").strip()
+        if not token:
+            return self.ensure_api_token()
+        if self.api_token() != token:
+            self.data["api_token"] = token
+            self.save()
+        return token
 
     def active_model(self) -> str:
         if self.provider() == "openrouter":

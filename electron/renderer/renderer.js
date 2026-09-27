@@ -1,4 +1,5 @@
 const backend = {
+  _token: null,
   async url(force) {
     if (!force && this._url) return this._url;
     if (window.jarvis) {
@@ -9,21 +10,42 @@ const backend = {
     }
     return this._url || null;
   },
+  // Bearer token for every /api call. In the app it arrives over IPC from
+  // electron/main.js - never fetched over HTTP, so nothing can race it. In a
+  // plain browser (no preload) dev mode supplies it once in the page URL:
+  // http://127.0.0.1:<port>/?token=<token>
+  async token() {
+    if (this._token) return this._token;
+    if (window.jarvis) {
+      try { this._token = await window.jarvis.getApiToken(); } catch (e) { /* no token */ }
+    }
+    if (!this._token) {
+      const t = new URLSearchParams(window.location.search).get('token');
+      if (t) this._token = t;
+    }
+    return this._token;
+  },
   // fetch wrapper: on network failure invalidate the cached URL, re-query the
   // real backend URL and retry once (covers the backend announcing its port
   // after the renderer already cached a stale/fallback URL)
   async _req(path, opts, retry) {
     const base = await this.url();
     if (!base) throw new Error('Backend not ready');
+    const headers = Object.assign({}, (opts && opts.headers) || {});
+    const token = await this.token();
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const reqOpts = Object.assign({}, opts, { headers });
     try {
-      const res = await fetch(`${base}${path}`, opts);
-      if (!res.ok) throw new Error(`Backend error ${res.status}`);
+      const res = await fetch(`${base}${path}`, reqOpts);
+      if (!res.ok) throw new Error(res.status === 401
+        ? 'Backend error 401 (API token missing)'
+        : `Backend error ${res.status}`);
       return res;
     } catch (e) {
       if (retry) {
         this._url = null;
         const base2 = await this.url();
-        if (base2 && base2 !== base) return this._req(path, opts, false);
+        if (base2 && base2 !== base) return this._req(path, reqOpts, false);
       }
       throw e;
     }

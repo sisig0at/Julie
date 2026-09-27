@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import hmac
 import os
 import sys
 import time
@@ -21,7 +22,7 @@ import speech_recognition as sr
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -34,11 +35,46 @@ CONFIG = core.CONFIG
 
 app = FastAPI(title="JARVIS Backend")
 
+# --- API auth: bearer token on every /api/* route except the liveness probe ---
+# electron/main.js creates the token once (config.json), passes it to this
+# process via JARVIS_API_TOKEN and to the renderer over IPC - it never travels
+# over HTTP. A manually started backend generates its own via config.ensure_api_token().
+_env_token = os.environ.get("JARVIS_API_TOKEN", "").strip()
+API_TOKEN = CONFIG.set_api_token(_env_token) if _env_token else CONFIG.ensure_api_token()
+print("🔑 API auth: /api/* requires 'Authorization: Bearer <token>' "
+      "(except /api/health)", flush=True)
+
+# /api/health only answers {"ok", "configured"} and is used as a plain liveness
+# probe by electron/main.js (checkExistingBackend) before the token exists.
+_AUTH_EXEMPT = {"/api/health"}
+
+
+# Registered BEFORE the CORS middleware on purpose: Starlette inserts each new
+# middleware at the front of the stack, so CORS ends up outermost and even 401
+# answers carry Access-Control-Allow-Origin for allowed origins.
+@app.middleware("http")
+async def require_api_token(request, call_next):
+    path = request.url.path
+    if (request.method != "OPTIONS"
+            and path.startswith("/api/")
+            and path not in _AUTH_EXEMPT):
+        supplied = request.headers.get("authorization", "")
+        if not hmac.compare_digest(supplied, f"Bearer {API_TOKEN}"):
+            return JSONResponse({"detail": "unauthorized: missing or invalid bearer token"},
+                                status_code=401)
+    return await call_next(request)
+
+
+# The UI reaches this backend from exactly two places:
+#   1. Electron's renderer loaded from file://  -> Origin: "null"
+#   2. this same backend serving electron/renderer on http://127.0.0.1:<port>
+# Anything else (other websites, other hosts) is refused - on top of the token.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["null"],
+    allow_origin_regex=r"^http://(127\.0\.0\.1|localhost)(:\d+)?$",
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["authorization", "content-type"],
 )
 
 AUDIO_DIR = Path(core.AUDIO_DIR)

@@ -7,7 +7,8 @@ A futuristic HUD voice assistant. Electron UI + Python (FastAPI) backend.
   open websites, volume control, lock screen, screenshots, screen vision,
   close windows/tabs, web search, find files, current time
 - Cross-platform: Linux + Windows 11
-- Works as an app (Electron) or in a browser (UI served by the backend)
+- Works as an app (Electron) or in a browser (UI served by the backend, see
+  "Local API token" for the `?token=` argument)
 
 ## Structure
 
@@ -133,6 +134,28 @@ drafts a GitHub release with the installer attached.
 On Linux, the Windows installer is built automatically by GitHub Actions
 (`.github/workflows/build-windows.yml`) on a real Windows runner and attached to
 the same draft release. Requires the `gh` CLI to be authenticated.
+
+## Local API token
+
+Every `/api/*` endpoint requires the header `Authorization: Bearer <token>` and
+answers `401` otherwise; the only exception is `GET /api/health` (a liveness
+probe used before the token is known). Static UI and `/audio/*` stay open - the
+`<audio>` element cannot send headers.
+
+The token is generated once on first start (`secrets.token_hex(32)` /
+`crypto.randomBytes(32)`) and stored in the same config file as the API key,
+field `api_token`. It is never part of `GET /api/config` and never fetched by
+the UI over HTTP:
+
+- **Electron**: `electron/main.js` creates/reads it, passes it to the backend
+  through the `JARVIS_API_TOKEN` environment variable and to the renderer
+  through IPC (`window.jarvis.getApiToken()`).
+- **Browser mode**: no IPC exists there, so pass it once in the URL:
+  `http://127.0.0.1:8765/?token=<api_token from config.json>`.
+
+CORS additionally allows only the two origins the UI can really come from:
+`http://127.0.0.1:<port>` / `http://localhost:<port>` (backend serving
+`electron/renderer`) and `null` (Electron's `file://` renderer).
 
 ## API key note
 

@@ -2,6 +2,8 @@ const { app, BrowserWindow, ipcMain, globalShortcut } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
+const crypto = require('crypto');
 const { autoUpdater } = require('electron-updater');
 
 // When launched from a file manager there is no terminal: stdout is a closed
@@ -21,6 +23,43 @@ const DEV_BACKEND_PORT = 8765;
 let mainWindow = null;
 let backendProcess = null;
 let backendUrl = null;
+let apiToken = '';   // local API bearer token (see ensureApiToken)
+
+// Same location src/config.py uses - the config lives OUTSIDE the repo
+// (%APPDATA%\Jarvis\config.json on Windows, ~/.config/jarvis/config.json else).
+function configFilePath() {
+  if (process.platform === 'win32') {
+    return path.join(process.env.APPDATA || os.homedir(), 'Jarvis', 'config.json');
+  }
+  const base = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
+  return path.join(base, 'jarvis', 'config.json');
+}
+
+// First start creates the API token once and stores it in config.json. It is
+// handed to the backend via JARVIS_API_TOKEN (spawn) and to the renderer via
+// IPC ('get-api-token') - deliberately never sent over HTTP.
+function ensureApiToken() {
+  const file = configFilePath();
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    let data = {};
+    try {
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) data = parsed;
+    } catch (e) {
+      console.warn('Config unreadable, starting a fresh one:', e.message);
+    }
+    if (typeof data.api_token !== 'string' || !data.api_token) {
+      data.api_token = crypto.randomBytes(32).toString('hex');
+      fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf8');
+      console.log('Generated API token in', file);
+    }
+    return data.api_token;
+  } catch (e) {
+    console.warn('Could not prepare API token:', e.message);
+    return '';
+  }
+}
 
 // Only one instance allowed: launching the app again (double click, updater)
 // focuses the existing window instead of spawning a second backend.
@@ -80,7 +119,12 @@ function startBackend() {
   }
   backendProcess = spawn(cmd, args, {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' }
+    env: {
+      ...process.env,
+      PYTHONUTF8: '1',
+      PYTHONIOENCODING: 'utf-8',
+      ...(apiToken ? { JARVIS_API_TOKEN: apiToken } : {})
+    }
   });
 
   const onOutput = (buf) => {
@@ -109,6 +153,7 @@ function startBackend() {
 }
 
 app.whenReady().then(async () => {
+  apiToken = ensureApiToken();   // before the backend starts: it gets the token via env
   if (app.isPackaged || !(await checkExistingBackend())) {
     startBackend();
   } else {
@@ -239,3 +284,6 @@ ipcMain.handle('window:focus', () => {
 });
 
 ipcMain.handle('get-backend-url', () => backendUrl);
+
+// The renderer authenticates with this token; IPC only, never over HTTP.
+ipcMain.handle('get-api-token', () => apiToken || null);
