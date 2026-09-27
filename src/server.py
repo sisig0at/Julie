@@ -150,6 +150,8 @@ class ConfigRequest(BaseModel):
     model: str | None = None
     openrouter_model: str | None = None
     ollama_model: str | None = None
+    brain_mode: str | None = None       # "manual" | "dual"
+    cloud_provider: str | None = None   # dual mode: "groq" | "openrouter"
 
 
 @app.get("/api/health")
@@ -170,6 +172,8 @@ async def save_config(req: ConfigRequest):
         model=req.model,
         openrouter_model=req.openrouter_model,
         ollama_model=req.ollama_model,
+        brain_mode=req.brain_mode,
+        cloud_provider=req.cloud_provider,
     )
     core.reload_client()
     return cfg
@@ -264,7 +268,7 @@ async def chat(req: ChatRequest):
         except Exception as e:
             print(f"⚠️ TTS Error: {e}")
 
-    return {"reply": reply, "audio": audio}
+    return {"reply": reply, "audio": audio, "brain": core.LAST_BRAIN}
 
 
 @app.post("/api/tts")

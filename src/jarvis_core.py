@@ -11,6 +11,7 @@ import edge_tts
 from openai import OpenAI, APIConnectionError, APIStatusError
 
 import platform_ops
+import brain_router
 import config as app_config
 
 # NOTE: pyautogui is imported lazily inside the functions that need it.
@@ -24,11 +25,23 @@ ACTIVE_PROVIDER = "groq"
 ACTIVE_MODEL = "llama-3.3-70b-versatile"
 ACTIVE_VISION_MODEL = "qwen/qwen3.6-27b"
 
+# --- Dual-brain clients (only used when brain_mode == "dual") ---
+# The manual client above stays the single source of truth in manual mode;
+# these are extra clients built from the same config for routed requests.
+LOCAL_CLIENT = None          # Ollama (local brain)
+LOCAL_MODEL = ""
+CLOUD_CLIENT = None          # Groq / OpenRouter (cloud brain)
+CLOUD_PROVIDER = "groq"
+CLOUD_MODEL = ""
+BRAIN_TAG = ""               # "[local]" | "[cloud]" for the request in flight
+LAST_BRAIN = ""              # brain of the last completed reply (sent to the UI)
+
 
 def reload_client():
     """(Re)build the OpenAI client from saved config. Called at startup and
     whenever the user saves new settings from the UI."""
     global client_groq, ACTIVE_PROVIDER, ACTIVE_MODEL, ACTIVE_VISION_MODEL
+    global LOCAL_CLIENT, LOCAL_MODEL, CLOUD_CLIENT, CLOUD_PROVIDER, CLOUD_MODEL
     ACTIVE_PROVIDER = CONFIG.provider()
     ACTIVE_MODEL = CONFIG.active_model()
     ACTIVE_VISION_MODEL = CONFIG.active_vision_model()
@@ -44,6 +57,21 @@ def reload_client():
         base_url = "https://api.groq.com/openai/v1"
     client_groq = OpenAI(base_url=base_url, api_key=api_key or "missing")
     print(f"🤖 Provider: {ACTIVE_PROVIDER} | Model: {ACTIVE_MODEL}")
+
+    # --- Dual-brain clients (built always, used only in brain_mode == "dual") ---
+    stored_key = CONFIG.data.get("api_key", "").strip() or "missing"
+    LOCAL_MODEL = CONFIG.local_model()
+    LOCAL_CLIENT = OpenAI(base_url=app_config.OLLAMA_BASE_URL, api_key="ollama")
+    CLOUD_PROVIDER = CONFIG.cloud_provider()
+    CLOUD_MODEL = CONFIG.cloud_model()
+    cloud_base = ("https://openrouter.ai/api/v1" if CLOUD_PROVIDER == "openrouter"
+                  else "https://api.groq.com/openai/v1")
+    CLOUD_CLIENT = OpenAI(base_url=cloud_base, api_key=stored_key)
+    if CONFIG.brain_mode() == "dual":
+        print(f"🧠 Brain mode: dual | local: {LOCAL_MODEL} | "
+              f"cloud: {CLOUD_PROVIDER}/{CLOUD_MODEL}")
+    else:
+        print("🧠 Brain mode: manual")
 
 
 reload_client()
@@ -87,13 +115,15 @@ STATUS = {
     "last_task": "",          # last completed task label
     "last_detail": "",        # last completed detail
     "last_ts": 0.0,           # timestamp last task finished
-    "finished": False         # True when the last task completed (UI shows it 5s)
+    "finished": False,        # True when the last task completed (UI shows it 5s)
+    "brain": ""               # "[local]" | "[cloud]" - which brain is handling it
 }
 
 
 def set_status(state: str, task: str = "", detail: str = ""):
     now = time.time()
     STATUS["state"] = state
+    STATUS["brain"] = BRAIN_TAG
     if task:
         STATUS["task"] = task
         STATUS["detail"] = detail
@@ -115,6 +145,33 @@ def finish_status(detail: str = ""):
 
 def get_status():
     return dict(STATUS)
+
+
+def _provider_brain_tag(provider: str) -> str:
+    return "[local]" if provider == "ollama" else "[cloud]"
+
+
+def cloud_key_present() -> bool:
+    return bool(CONFIG.data.get("api_key", "").strip())
+
+
+def resolve_brain(prompt: str):
+    """Decide which brain handles this request.
+
+    manual mode -> the provider from config decides everything (legacy
+                   behaviour, byte-for-byte the same client/model as before)
+    dual mode   -> brain_router.classify() sends simple prompts to the local
+                   Ollama brain and hard ones to the configured cloud brain
+
+    Returns (brain_tag, client, model, route_reason_for_the_logs).
+    """
+    if CONFIG.brain_mode() != "dual":
+        return (_provider_brain_tag(ACTIVE_PROVIDER), client_groq, ACTIVE_MODEL,
+                f"manual/{ACTIVE_PROVIDER}")
+    brain, reason = brain_router.classify(prompt)
+    if brain == "local":
+        return "[local]", LOCAL_CLIENT, LOCAL_MODEL, reason
+    return "[cloud]", CLOUD_CLIENT, CLOUD_MODEL, reason
 
 conversation_history = [
     {
@@ -470,12 +527,26 @@ def execute_action(tool_name: str, tool_args: dict) -> str:
 
 
 async def fetch_ai_response(user_prompt: str) -> str:
-    global conversation_history
+    global conversation_history, BRAIN_TAG, LAST_BRAIN
 
-    if not CONFIG.is_configured():
+    # Manual mode keeps the exact legacy check; in dual mode the local brain
+    # works without any API key, so the key requirement moves to the cloud arm.
+    if CONFIG.brain_mode() != "dual" and not CONFIG.is_configured():
         print("⚠️ No API key configured")
         set_status("error", "config required")
         return "No API key configured yet. Open settings to add your key."
+
+    # --- Brain routing: decide BEFORE calling the LLM ---
+    brain_tag, client, model, route_reason = resolve_brain(user_prompt)
+    BRAIN_TAG = brain_tag
+    LAST_BRAIN = brain_tag
+    print(f"{brain_tag} route: {route_reason}")
+
+    if brain_tag == "[cloud]" and CONFIG.brain_mode() == "dual" and not cloud_key_present():
+        print("⚠️ Cloud brain has no API key")
+        set_status("error", "cloud key required")
+        return ("The cloud brain has no API key configured. Add one in settings "
+                "(gear icon), or switch BRAIN to manual with the Ollama provider.")
 
     set_status("thinking", "processing", user_prompt[:60])
     conversation_history.append({"role": "user", "content": user_prompt})
@@ -484,13 +555,31 @@ async def fetch_ai_response(user_prompt: str) -> str:
         conversation_history = [conversation_history[0]] + conversation_history[-8:]
 
     try:
-        response = client_groq.chat.completions.create(
-            model=ACTIVE_MODEL,
-            messages=conversation_history,
-            tools=ACTION_TOOLS,
-            temperature=0.6,
-            max_tokens=400
-        )
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=conversation_history,
+                tools=ACTION_TOOLS,
+                temperature=0.6,
+                max_tokens=400
+            )
+        except Exception as first_err:
+            # Dual mode: if the local brain is down / has no model, retry once
+            # with the cloud brain instead of failing the whole request.
+            if (brain_tag == "[local]" and CONFIG.brain_mode() == "dual"
+                    and ollama_error_message(first_err) and cloud_key_present()):
+                print(f"{brain_tag} unavailable → falling back to [cloud]: {first_err}")
+                brain_tag, client, model = "[cloud]", CLOUD_CLIENT, CLOUD_MODEL
+                BRAIN_TAG = LAST_BRAIN = brain_tag
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=conversation_history,
+                    tools=ACTION_TOOLS,
+                    temperature=0.6,
+                    max_tokens=400
+                )
+            else:
+                raise
         message = response.choices[0].message
         cleaned_reply = ""
 
@@ -504,7 +593,7 @@ async def fetch_ai_response(user_prompt: str) -> str:
                         tool_args = json.loads(tool_call.function.arguments or "{}")
                     except json.JSONDecodeError:
                         tool_args = {}
-                    print(f"🧰 Executing: {tool_name}({tool_args})")
+                    print(f"{BRAIN_TAG} 🧰 Executing: {tool_name}({tool_args})")
                     result = execute_action(tool_name, tool_args)
                     conversation_history.append({
                         "role": "tool",
@@ -513,8 +602,8 @@ async def fetch_ai_response(user_prompt: str) -> str:
                     })
 
                 set_status("thinking", "formulating reply")
-                message = client_groq.chat.completions.create(
-                    model=ACTIVE_MODEL,
+                message = client.chat.completions.create(
+                    model=model,
                     messages=conversation_history,
                     tools=ACTION_TOOLS,
                     temperature=0.6,
@@ -532,13 +621,13 @@ async def fetch_ai_response(user_prompt: str) -> str:
                     tool_args = json.loads(leak_match.group(2) or "{}")
                 except json.JSONDecodeError:
                     tool_args = {}
-                print(f"🧰 Executing (leaked): {tool_name}({tool_args})")
+                print(f"{BRAIN_TAG} 🧰 Executing (leaked): {tool_name}({tool_args})")
                 result = execute_action(tool_name, tool_args)
                 conversation_history.append(message)
                 conversation_history.append({"role": "tool", "tool_call_id": "leak", "content": result})
                 set_status("thinking", "formulating reply")
-                message = client_groq.chat.completions.create(
-                    model=ACTIVE_MODEL,
+                message = client.chat.completions.create(
+                    model=model,
                     messages=conversation_history,
                     tools=ACTION_TOOLS,
                     temperature=0.6,
@@ -557,11 +646,13 @@ async def fetch_ai_response(user_prompt: str) -> str:
         conversation_history.append({"role": "assistant", "content": cleaned_reply})
         set_status("idle", "complete", cleaned_reply[:60])
         STATUS["last_ts"] = time.time()
+        print(f"{BRAIN_TAG} 🧠 reply: {cleaned_reply[:80]}")
         return cleaned_reply
     except Exception as e:
         # Ollama runs locally: explain availability problems instead of
-        # returning a generic (silent) connection error.
-        if ACTIVE_PROVIDER == "ollama":
+        # returning a generic (silent) connection error. In dual mode this
+        # also covers requests routed to the local brain.
+        if brain_tag == "[local]":
             ollama_msg = ollama_error_message(e)
             if ollama_msg:
                 print(f"❌ Ollama Error: {e}")
@@ -578,14 +669,14 @@ async def fetch_ai_response(user_prompt: str) -> str:
                         tool_args = json.loads(match.group(2) or "{}")
                     except json.JSONDecodeError:
                         tool_args = {}
-                    print(f"🧰 Executing (recovered): {tool_name}({tool_args})")
+                    print(f"{BRAIN_TAG} 🧰 Executing (recovered): {tool_name}({tool_args})")
                     result = execute_action(tool_name, tool_args)
                     conversation_history.append({"role": "user", "content": f"[Action {tool_name} executed: {result}]"})
                 else:
                     conversation_history.append({"role": "user", "content": user_prompt})
 
-                follow_up = client_groq.chat.completions.create(
-                    model=ACTIVE_MODEL,
+                follow_up = client.chat.completions.create(
+                    model=model,
                     messages=conversation_history,
                     temperature=0.6,
                     max_tokens=300
@@ -595,6 +686,7 @@ async def fetch_ai_response(user_prompt: str) -> str:
                 conversation_history.append({"role": "assistant", "content": cleaned_retry})
                 set_status("idle", "complete", cleaned_retry[:60])
                 STATUS["last_ts"] = time.time()
+                print(f"{BRAIN_TAG} 🧠 reply: {cleaned_retry[:80]}")
                 return cleaned_retry
             except Exception:
                 pass

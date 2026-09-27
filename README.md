@@ -15,6 +15,7 @@ A futuristic HUD voice assistant. Electron UI + Python (FastAPI) backend.
 ├── src/                  Python backend (FastAPI)
 │   ├── server.py         API server (port 8765 / dynamic in packaged mode)
 │   ├── jarvis_core.py    AI logic, tools, TTS, status
+│   ├── brain_router.py   Dual-brain classifier: local (Ollama) vs cloud prompt
 │   ├── platform_ops.py   Cross-platform system operations
 │   ├── config.py         User config (API key/provider/model) - NOT bundled
 │   └── audio/            Generated TTS files (gitignored)
@@ -60,6 +61,35 @@ If the service is not running or the selected model is not pulled, the settings 
 and the chat show an actionable error instead of failing silently. Tool-calling uses the
 same OpenAI-compatible format, so the tools work as with Groq/OpenRouter (pick a model
 that supports tools, e.g. `qwen2.5`, `llama3.1`, `llama3.2`, `mistral`).
+
+### Dual-brain routing (BRAIN: Dual)
+
+Next to **PROVIDER** the settings dialog has a **BRAIN** selector:
+
+- `Manual - one provider` (default) - exactly the old behaviour: the chosen provider
+  handles every request.
+- `Dual - local + cloud routing` - a heuristic router (`src/brain_router.py`) looks at the
+  prompt *before* the LLM call: short factual/household commands and built-in tool
+  requests (`get_current_time`, `list_apps`, volume, lock screen, ...) go to the local
+  Ollama brain, prompts that need reasoning, code, comparison or long context go to the
+  cloud brain (Groq/OpenRouter - picked by PROVIDER in this mode).
+
+In dual mode the **Ollama model row and the cloud model row are both active**, the API
+key belongs to the cloud brain, and the manual provider in `config.json` is left alone
+(`brain_mode: "dual"` + `cloud_provider` are stored alongside it). If the local brain is
+down, the request is retried once on the cloud brain instead of failing.
+
+Where to see the route: backend log (`[local] route: ...`, `[local] 🧰 Executing: ...`,
+`[local] 🧠 reply: ...`), the status banner (`[local] GET CURRENT TIME`), and the answer
+bubbles are prefixed with `[local]` / `[cloud]`.
+
+Tuning the classifier - edit `ROUTING_RULES` / `DEFAULT_BRAIN` in `src/brain_router.py`
+(ordered rules, first match wins: length thresholds, keyword stems, regex patterns).
+Quick check without starting the app:
+
+```bash
+venv/bin/python src/brain_router.py "объясни как работает рекурсия"
+```
 
 ## Packaging (installer)
 

@@ -126,23 +126,24 @@ function formatDetail(detail) {
 
 function handleStatus(data) {
   const state = data.state || 'idle';
+  const brain = data.brain ? `${data.brain} ` : '';   // "[local] " / "[cloud] "
 
   // current task running
   if (state === 'executing' && data.task) {
     const key = `x|${data.ts}`;
     if (key !== lastTaskKey) {
       lastTaskKey = key;
-      showBanner('', 'EXECUTING', `${data.task.replace(/_/g, ' ').toUpperCase()} · ${formatDetail(data.detail)}`);
+      showBanner('', 'EXECUTING', `${brain}${data.task.replace(/_/g, ' ').toUpperCase()} · ${formatDetail(data.detail)}`);
       coreOrb.classList.add('busy');
-      statusLabel.textContent = 'EXECUTING';
+      statusLabel.textContent = `EXECUTING ${data.brain || ''}`.trim();
     }
   } else if (state === 'thinking') {
-    statusLabel.textContent = 'THINKING';
+    statusLabel.textContent = `THINKING ${data.brain || ''}`.trim();
     coreOrb.classList.add('busy');
   } else if (state === 'error') {
     statusLabel.textContent = 'ERROR';
     coreOrb.classList.add('error');
-    if (data.task) showBanner('error', 'ERROR', data.task.replace(/_/g, ' '));
+    if (data.task) showBanner('error', 'ERROR', `${brain}${data.task.replace(/_/g, ' ')}`);
   } else if (state === 'idle') {
     coreOrb.classList.remove('busy', 'error');
 
@@ -152,7 +153,7 @@ function handleStatus(data) {
       if (key !== lastTaskKey) {
         lastTaskKey = key;
         const title = data.last_task.replace(/_/g, ' ').toUpperCase();
-        showBanner('done', 'COMPLETE', `${title}${data.last_detail ? ' · ' + data.last_detail : ''}`);
+        showBanner('done', 'COMPLETE', `${brain}${title}${data.last_detail ? ' · ' + data.last_detail : ''}`);
       }
     }
     statusLabel.textContent = 'STANDBY';
@@ -223,8 +224,8 @@ async function sendMessage() {
   appendMessage('user', text);
   statusLabel.textContent = 'PROCESSING';
   try {
-    const { reply, audio: audioFile } = await backend.chat(text);
-    appendMessage('jarvis', reply);
+    const { reply, audio: audioFile, brain } = await backend.chat(text);
+    appendMessage('jarvis', brain ? `${brain} ${reply}` : reply);
     if (audioFile) {
       const base = await backend.url();
       playAudio(`${base}/audio/${audioFile}`);
@@ -257,8 +258,8 @@ micBtn.addEventListener('click', async () => {
         appendMessage('user', text);
         input.value = '';
         statusLabel.textContent = 'PROCESSING';
-        const { reply, audio: audioFile } = await backend.chat(text);
-        appendMessage('jarvis', reply);
+        const { reply, audio: audioFile, brain } = await backend.chat(text);
+        appendMessage('jarvis', brain ? `${brain} ${reply}` : reply);
         if (audioFile) {
           const base = await backend.url();
           playAudio(`${base}/audio/${audioFile}`);
@@ -318,6 +319,7 @@ if (window.jarvis) {
 const settingsOverlay = $('settings-overlay');
 const settingsHint = $('settings-hint');
 const cfgProvider = $('cfg-provider');
+const cfgBrainMode = $('cfg-brain-mode');
 const cfgKey = $('cfg-key');
 const cfgKeyRow = $('cfg-key-row');
 const cfgKeyToggle = $('cfg-key-toggle');
@@ -329,8 +331,11 @@ const modelRowGroq = $('cfg-model-row-groq');
 const modelRowOr = $('cfg-model-row-openrouter');
 const modelRowOllama = $('cfg-model-row-ollama');
 const gearBtn = $('btn-settings');
+const ollamaOption = cfgProvider.querySelector('option[value="ollama"]');
 
 let hintBase = '';
+let manualProvider = 'groq';     // PROVIDER value while BRAIN = manual
+let cloudProviderSel = 'groq';   // PROVIDER value while BRAIN = dual (cloud brain)
 
 function openSettings(firstRun) {
   hintBase = firstRun
@@ -350,9 +355,11 @@ function closeSettings() {
 async function loadSettingsForm() {
   try {
     const cfg = await backend.config();
-    cfgProvider.value = ['openrouter', 'ollama'].includes(cfg.provider) ? cfg.provider : 'groq';
+    manualProvider = ['groq', 'openrouter', 'ollama'].includes(cfg.provider) ? cfg.provider : 'groq';
+    cloudProviderSel = ['groq', 'openrouter'].includes(cfg.cloud_provider) ? cfg.cloud_provider : 'groq';
+    cfgBrainMode.value = cfg.brain_mode === 'dual' ? 'dual' : 'manual';
     cfgKey.value = '';
-    await onProviderChange(cfg.provider, cfg);
+    await refreshForm(cfg);
   } catch {
     cfgStatus.textContent = 'CONFIG UNAVAILABLE';
     cfgStatus.className = 'modal-status error';
@@ -364,24 +371,9 @@ function setCfgStatus(text, isError) {
   cfgStatus.className = isError ? 'modal-status error' : 'modal-status';
 }
 
-async function onProviderChange(provider, cfg) {
-  const isOr = provider === 'openrouter';
-  const isOllama = provider === 'ollama';
-  setCfgStatus('', false);
-
-  // Ollama runs locally: no API key field, dedicated model field
-  cfgKeyRow.classList.toggle('hidden', isOllama);
-  modelRowGroq.classList.toggle('hidden', isOr || isOllama);
-  modelRowOr.classList.toggle('hidden', !isOr);
-  modelRowOllama.classList.toggle('hidden', !isOllama);
-  settingsHint.textContent = isOllama
-    ? 'Ollama runs on your machine, so no API key is needed. The Ollama service must be running on http://localhost:11434.'
-    : hintBase;
-
-  const target = isOr ? cfgModelOr : isOllama ? cfgModelOllama : cfgModel;
-  const list = isOr ? $('cfg-model-or-list') : isOllama ? $('cfg-model-ollama-list') : $('cfg-model-list');
+async function fillModelList(target, list, provider, saved) {
   list.innerHTML = '';
-  target.value = '';
+  target.value = saved || '';
   try {
     const res = await backend.models(provider);
     for (const m of res.models) {
@@ -389,24 +381,74 @@ async function onProviderChange(provider, cfg) {
       opt.value = m.id;
       list.appendChild(opt);
     }
-    if (isOllama && res.reachable === false) {
+    if (provider === 'ollama' && res.reachable === false) {
       setCfgStatus(res.error || 'OLLAMA NOT REACHABLE ON localhost:11434', true);
-    } else if (isOllama) {
-      setCfgStatus('', false);
     }
   } catch (e) {
     /* datalist stays empty; typing a model id still works */
-    if (isOllama) {
+    if (provider === 'ollama') {
       setCfgStatus('OLLAMA NOT REACHABLE ON localhost:11434 - RUN `ollama serve`', true);
     }
   }
-  if (cfg) {
-    const saved = isOr ? cfg.openrouter_model : isOllama ? cfg.ollama_model : cfg.model;
-    if (saved) target.value = saved;
-  }
 }
 
-cfgProvider.addEventListener('change', () => onProviderChange(cfgProvider.value, null));
+/* Show/hide the rows for the current BRAIN mode + provider and reload the
+   model datalists. cfg = freshly loaded config, null = user just toggled. */
+async function refreshForm(cfg) {
+  const dual = cfgBrainMode.value === 'dual';
+  if (dual && cloudProviderSel === 'ollama') cloudProviderSel = 'groq'; // dual: local brain is always Ollama
+  const provider = dual ? cloudProviderSel : manualProvider;
+  const isOllama = !dual && provider === 'ollama';
+
+  setCfgStatus('', false);
+
+  // In dual mode PROVIDER selects the CLOUD brain, so Ollama can't be picked
+  // there (the local brain is always Ollama and gets its own MODEL row).
+  ollamaOption.disabled = dual;
+  cfgProvider.value = provider;
+
+  // API key: required by the cloud brain, never needed by the local one
+  cfgKeyRow.classList.toggle('hidden', isOllama);
+
+  const showGroq = dual ? cloudProviderSel === 'groq' : provider === 'groq';
+  const showOr = dual ? cloudProviderSel === 'openrouter' : provider === 'openrouter';
+  const showOllama = dual || isOllama;   // dual: both model rows active at once
+  modelRowGroq.classList.toggle('hidden', !showGroq);
+  modelRowOr.classList.toggle('hidden', !showOr);
+  modelRowOllama.classList.toggle('hidden', !showOllama);
+
+  settingsHint.textContent = dual
+    ? `Dual brain: short commands go to local Ollama, harder prompts to ${cloudProviderSel === 'openrouter' ? 'OpenRouter' : 'Groq'}. Both model fields below are active.`
+    : isOllama
+      ? 'Ollama runs on your machine, so no API key is needed. The Ollama service must be running on http://localhost:11434.'
+      : hintBase;
+
+  const jobs = [];
+  if (showGroq) {
+    jobs.push(fillModelList(cfgModel, $('cfg-model-list'), 'groq',
+      cfg ? cfg.model : cfgModel.value));
+  }
+  if (showOr) {
+    jobs.push(fillModelList(cfgModelOr, $('cfg-model-or-list'), 'openrouter',
+      cfg ? cfg.openrouter_model : cfgModelOr.value));
+  }
+  if (showOllama) {
+    jobs.push(fillModelList(cfgModelOllama, $('cfg-model-ollama-list'), 'ollama',
+      cfg ? cfg.ollama_model : cfgModelOllama.value));
+  }
+  await Promise.all(jobs);
+}
+
+cfgProvider.addEventListener('change', () => {
+  if (cfgBrainMode.value === 'dual') {
+    if (cfgProvider.value !== 'ollama') cloudProviderSel = cfgProvider.value; // local brain is always Ollama
+  } else {
+    manualProvider = cfgProvider.value;
+  }
+  refreshForm(null);
+});
+
+cfgBrainMode.addEventListener('change', () => refreshForm(null));
 
 cfgKeyToggle.addEventListener('click', () => {
   const show = cfgKey.type === 'password';
@@ -420,35 +462,47 @@ settingsOverlay.addEventListener('click', (e) => {
 });
 
 $('btn-settings-save').addEventListener('click', async () => {
-  const provider = cfgProvider.value;
-  const isOllama = provider === 'ollama';
+  const dual = cfgBrainMode.value === 'dual';
+  if (dual && cloudProviderSel === 'ollama') cloudProviderSel = 'groq';
+  const provider = dual ? cloudProviderSel : manualProvider;
+  const isOllama = !dual && provider === 'ollama';
   const key = cfgKey.value.trim();
 
-  if (!isOllama && !key) {
+  if (!dual && !isOllama && !key) {
     setCfgStatus('ENTER AN API KEY', true);
     return;
   }
-  if (isOllama && !cfgModelOllama.value.trim()) {
+  if ((isOllama || dual) && !cfgModelOllama.value.trim()) {
     setCfgStatus('ENTER AN OLLAMA MODEL (e.g. llama3.2)', true);
     return;
   }
   const payload = {
-    provider,
     model: cfgModel.value.trim(),
     openrouter_model: cfgModelOr.value.trim(),
-    ollama_model: cfgModelOllama.value.trim()
+    ollama_model: cfgModelOllama.value.trim(),
+    brain_mode: dual ? 'dual' : 'manual'
   };
-  // keep the stored key untouched when Ollama (no key) is selected
-  if (!isOllama) payload.api_key = key;
+  if (dual) {
+    // dual routes on top of the manual provider: only the cloud brain is saved,
+    // so switching back to manual keeps the provider the user had picked there
+    payload.cloud_provider = cloudProviderSel;
+  } else {
+    payload.provider = provider;
+  }
+  // keep the stored key untouched when Ollama (no key) is selected, and in dual
+  // mode where the key may already be stored (field starts empty)
+  if (!isOllama && key) payload.api_key = key;
 
   setCfgStatus('SAVING...', false);
   try {
     await backend.saveConfig(payload);
     setCfgStatus('SAVED', false);
     cfgKey.value = '';
-    appendMessage('sys', isOllama
-      ? 'CONFIG UPDATED. RUNNING ON LOCAL OLLAMA.'
-      : 'CONFIG UPDATED. JARVIS ACTIVATED.');
+    appendMessage('sys', dual
+      ? `CONFIG UPDATED. DUAL BRAIN: LOCAL OLLAMA + ${cloudProviderSel === 'openrouter' ? 'OPENROUTER' : 'GROQ'}.`
+      : isOllama
+        ? 'CONFIG UPDATED. RUNNING ON LOCAL OLLAMA.'
+        : 'CONFIG UPDATED. JARVIS ACTIVATED.');
     setTimeout(closeSettings, 700);
   } catch (e) {
     setCfgStatus('SAVE FAILED: ' + e.message, true);
