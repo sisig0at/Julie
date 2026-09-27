@@ -2,7 +2,7 @@
 
 A futuristic HUD voice assistant. Electron UI + Python (FastAPI) backend.
 
-- Voice input (mic), speech output (edge-tts), text chat
+- Voice input (mic, EN/RU recognition language), speech output (edge-tts), text chat
 - AI tool use (Groq / OpenRouter / local Ollama, function calling): open/close apps,
   open websites, volume control, lock screen, screenshots, screen vision,
   close windows/tabs, web search, find files, current time
@@ -46,6 +46,18 @@ API key, model choice). **The key is stored in the user config dir, never in the
 - Windows: `%APPDATA%\Jarvis\config.json`
 
 Click the gear icon (bottom right) any time to change the provider/key/model.
+
+### Voice input language (EN / RU)
+
+The button left of the mic toggles the recognition language: `EN` (default,
+`en-US`) or `RU` (`ru-RU`). The choice is saved to `config.json`
+(`stt_language`, so it survives a restart) and passed as `?lang=` to
+`POST /api/listen`.
+
+Transcription goes through Google Web Speech (the `SpeechRecognition` library),
+which needs **an internet connection** and recognises exactly one locale per
+request - there is no automatic RU/EN detection, so flip the button before
+speaking. TTS (edge-tts) is untouched.
 
 ### Local model (Ollama)
 

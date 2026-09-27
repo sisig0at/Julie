@@ -59,6 +59,22 @@ def _chunk_energy(data: bytes) -> float:
     return sum(s * s for s in samples) / len(samples)
 
 
+def _resolve_stt_lang(lang: str) -> str:
+    """Language for this recognition request.
+
+    ?lang= (from the UI toggle) wins over the saved preference; the shortcuts
+    "en"/"ru" are expanded via config.STT_LANGS, a full locale ("de-DE") passes
+    through, anything unrecognised falls back to the saved config value."""
+    raw = str(lang or "").strip().lower().replace("_", "-")
+    if raw in app_config.STT_LANGS:
+        return app_config.STT_LANGS[raw]
+    if raw:
+        parts = raw.split("-")
+        if len(parts) <= 2 and all(p.isalpha() for p in parts):
+            return "-".join([parts[0], parts[1].upper()] if len(parts) == 2 else parts)
+    return CONFIG.stt_language()
+
+
 @app.post("/api/listen/stop")
 async def stop_listen():
     """Interrupt an active recording early."""
@@ -67,12 +83,14 @@ async def stop_listen():
 
 
 @app.post("/api/listen")
-async def listen_once(timeout: float = 5.0, phrase_limit: float = 10.0):
+async def listen_once(timeout: float = 5.0, phrase_limit: float = 10.0, lang: str = ""):
     """Record from the mic and return transcribed text.
-    Stops early when: the user clicks stop, or silence follows speech (1s)."""
+    Stops early when: the user clicks stop, or silence follows speech (1s).
+    lang: recognition language ("en" / "ru" / "ru-RU"); empty = saved pref."""
     if _listening["active"]:
         return {"text": "", "error": "already_listening"}
 
+    stt_lang = _resolve_stt_lang(lang)
     _listening["active"] = True
     _stop_event.clear()
     try:
@@ -119,7 +137,9 @@ async def listen_once(timeout: float = 5.0, phrase_limit: float = 10.0):
                         return ""
 
                     audio = sr.AudioData(b"".join(frames), sample_rate, sample_width)
-                    return _recognizer.recognize_google(audio)
+                    # language= is what makes RU recognition work at all:
+                    # without it recognize_google always transcribes as en-US.
+                    return _recognizer.recognize_google(audio, language=stt_lang)
             except sr.WaitTimeoutError:
                 return ""
             except sr.UnknownValueError:
@@ -152,6 +172,7 @@ class ConfigRequest(BaseModel):
     ollama_model: str | None = None
     brain_mode: str | None = None       # "manual" | "dual"
     cloud_provider: str | None = None   # dual mode: "groq" | "openrouter"
+    stt_language: str | None = None     # voice input: "en" | "ru"
 
 
 @app.get("/api/health")
@@ -174,6 +195,7 @@ async def save_config(req: ConfigRequest):
         ollama_model=req.ollama_model,
         brain_mode=req.brain_mode,
         cloud_provider=req.cloud_provider,
+        stt_language=req.stt_language,
     )
     core.reload_client()
     return cfg

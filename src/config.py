@@ -27,7 +27,28 @@ DEFAULT_CONFIG = {
     "brain_mode": "manual",
     "cloud_provider": "",       # dual-mode cloud brain: "groq" | "openrouter"
                                 # "" = follow "provider" when it is a cloud one
+    "stt_language": "en-US",    # voice input language: "en-US" | "ru-RU"
 }
+
+# --- Speech-to-text language ---
+# Recognised speech goes through Google Web Speech (recognize_google), which
+# needs ONE explicit locale per request - there is no cross-language auto
+# detection on that endpoint. These are the UI values ("en"/"ru") mapped onto
+# the locale codes Google accepts.
+STT_LANGS = {
+    "en": "en-US",
+    "en-us": "en-US",
+    "en-gb": "en-GB",
+    "ru": "ru-RU",
+    "ru-ru": "ru-RU",
+}
+
+
+def normalize_stt_lang(lang) -> str:
+    """UI value or locale -> supported locale. Unknown/empty falls back to
+    en-US, i.e. exactly how the app behaved before the language toggle."""
+    key = str(lang or "").strip().lower().replace("_", "-")
+    return STT_LANGS.get(key, "en-US")
 
 # Ollama exposes an OpenAI-compatible API, so the same client is reused with
 # this base_url and without a real API key.
@@ -139,6 +160,10 @@ class AppConfig:
         """Model of the local brain (Ollama) in dual mode."""
         return self.data.get("ollama_model") or DEFAULT_CONFIG["ollama_model"]
 
+    def stt_language(self) -> str:
+        """Recognition language for voice input ("en-US" | "ru-RU")."""
+        return normalize_stt_lang(self.data.get("stt_language"))
+
     def active_model(self) -> str:
         if self.provider() == "openrouter":
             return self.data.get("openrouter_model") or DEFAULT_CONFIG["openrouter_model"]
@@ -154,7 +179,8 @@ class AppConfig:
         return self.data.get("vision_model") or DEFAULT_CONFIG["vision_model"]
 
     def update(self, provider=None, api_key=None, model=None, openrouter_model=None,
-               ollama_model=None, brain_mode=None, cloud_provider=None) -> dict:
+               ollama_model=None, brain_mode=None, cloud_provider=None,
+               stt_language=None) -> dict:
         if provider in ("groq", "openrouter", "ollama"):
             self.data["provider"] = provider
         if api_key is not None:
@@ -170,6 +196,8 @@ class AppConfig:
             self.data["brain_mode"] = brain_mode
         if cloud_provider in ("groq", "openrouter"):
             self.data["cloud_provider"] = cloud_provider
+        if stt_language:
+            self.data["stt_language"] = normalize_stt_lang(stt_language)
         self.save()
         return self.public()
 
@@ -183,4 +211,5 @@ class AppConfig:
             "ollama_model": self.data.get("ollama_model", ""),
             "brain_mode": self.brain_mode(),
             "cloud_provider": self.cloud_provider(),
+            "stt_language": self.stt_language(),
         }

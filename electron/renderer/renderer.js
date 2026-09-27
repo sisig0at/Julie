@@ -43,8 +43,11 @@ const backend = {
   async clear() {
     await this._req('/api/clear', { method: 'POST' }, true);
   },
-  async listen() {
-    const res = await this._req('/api/listen', { method: 'POST' }, true);
+  async listen(lang) {
+    // lang = recognition language from the UI toggle ("en-US" / "ru-RU");
+    // omitted -> backend falls back to the language saved in config
+    const q = lang ? `?lang=${encodeURIComponent(lang)}` : '';
+    const res = await this._req(`/api/listen${q}`, { method: 'POST' }, true);
     return res.json();
   },
   async stopListen() {
@@ -81,6 +84,7 @@ const clockEl = $('clock');
 const input = $('text-input');
 const sendBtn = $('btn-send');
 const micBtn = $('btn-mic');
+const langBtn = $('btn-lang');
 const clearBtn = $('btn-clear');
 const banner = $('task-banner');
 const bannerIcon = $('banner-icon');
@@ -182,6 +186,7 @@ async function pollStatus() {
       backendText.textContent = 'ONLINE';
       backendText.classList.add('online');
       appendMessage('sys', 'UPLINK ESTABLISHED. ALL SYSTEMS GO.');
+      loadSttLang();   // pick up the saved recognition language (EN/RU)
     }
     handleStatus(data);
     checkFirstRun();
@@ -243,6 +248,38 @@ input.addEventListener('keydown', (e) => {
 
 let isListening = false;
 
+/* ---------------- speech recognition language (EN / RU) ----------------
+   Google Web Speech transcribes in exactly one locale per request, so the
+   chosen language is sent as ?lang= on every /api/listen call and persisted
+   in config (stt_language) to survive a restart. Default stays en-US. */
+let sttLang = 'en-US';
+
+function renderLang() {
+  langBtn.textContent = sttLang.startsWith('ru') ? 'RU' : 'EN';
+  langBtn.title = `Speech recognition language: ${sttLang}`;
+}
+
+async function loadSttLang() {
+  try {
+    const cfg = await backend.config();
+    if (cfg && cfg.stt_language) sttLang = cfg.stt_language;
+  } catch { /* keep the default (en-US) */ }
+  renderLang();
+}
+
+langBtn.addEventListener('click', async () => {
+  sttLang = sttLang.startsWith('ru') ? 'en-US' : 'ru-RU';
+  renderLang();
+  try {
+    await backend.saveConfig({ stt_language: sttLang });
+    appendMessage('sys', `VOICE INPUT LANGUAGE: ${sttLang.startsWith('ru') ? 'RUSSIAN' : 'ENGLISH'}`);
+  } catch (e) {
+    appendMessage('error', `LANGUAGE SAVE FAILED: ${e.message}`);
+  }
+});
+
+renderLang();
+
 micBtn.addEventListener('click', async () => {
   if (!isListening) {
     // START listening
@@ -253,7 +290,7 @@ micBtn.addEventListener('click', async () => {
     appendMessage('sys', 'LISTENING... CLICK AGAIN TO STOP');
 
     try {
-      const { text, error } = await backend.listen();
+      const { text, error } = await backend.listen(sttLang);
       if (text) {
         appendMessage('user', text);
         input.value = '';
