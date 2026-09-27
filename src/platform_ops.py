@@ -1,9 +1,18 @@
-"""Cross-platform system operations for JARVIS (Linux + Windows 11)."""
+"""Cross-platform system operations for JARVIS (Linux + Windows 11).
+
+Security note (command injection): every external program is started with
+subprocess and an ARGUMENT LIST - there is no shell anywhere in this module,
+so model-supplied strings can never be parsed as shell syntax. On top of that
+`is_safe_label()` rejects control characters in names before they are used.
+Where a string has to be tokenized (.desktop Exec line) shlex.split() is used.
+"""
 import os
 import re
+import shlex
+import shutil
+import subprocess
 import sys
 import time
-import shutil
 import urllib.parse
 import urllib.request
 
@@ -28,6 +37,27 @@ def _init():
 
 
 _init()
+
+
+# ---------- input validation for tool arguments ----------
+# Arguments arrive from the LLM (tool calls). subprocess + argument list already
+# makes shell injection impossible; this is defence in depth on top: reject
+# names containing shell/OS control characters or line breaks.
+_UNSAFE_CHARS = set(";&|><\n\r") | {chr(i) for i in range(32)}
+
+
+def is_safe_label(value) -> bool:
+    """True for a plain application/process name: not empty, sane length,
+    no control characters (;, &, |, >, <, newlines, ...)."""
+    text = str(value or "")
+    if not text or len(text) > 200:
+        return False
+    return not any(ch in _UNSAFE_CHARS for ch in text)
+
+
+def _run_quiet(argv, timeout: int = 15) -> subprocess.CompletedProcess:
+    """Run a program without a shell (argument list => nothing to quote/escape)."""
+    return subprocess.run(argv, capture_output=True, timeout=timeout)
 
 
 # ---------- applications ----------
@@ -100,6 +130,8 @@ def _find_desktop_exec(app_name: str):
 def open_app(app_name: str) -> str:
     if not app_name:
         return "No app name given."
+    if not is_safe_label(app_name):
+        return "Invalid application name (control characters are not allowed)."
     if IS_WINDOWS:
         exe_map = {
             "chrome": "chrome", "firefox": "firefox", "edge": "msedge",
@@ -108,17 +140,37 @@ def open_app(app_name: str) -> str:
             "cmd": "cmd", "terminal": "wt", "vscode": "code", "code": "code",
         }
         exe = exe_map.get(app_name.lower(), app_name.lower())
-        if os.system(f'start "" {exe}') == 0:
-            return f"Opened {app_name}."
-        return f"Could not open {app_name}."
+        # No shell and no `start`: CreateProcess resolves bare names via PATH,
+        # and a list argument cannot be reinterpreted as shell syntax.
+        try:
+            subprocess.Popen([exe], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as e:
+            return f"Could not open {app_name} ({e})."
+        return f"Opened {app_name}."
     # Linux
     exec_cmd = _find_desktop_exec(app_name)
     if exec_cmd:
         exec_cmd = re.sub(r"%(f|u|F|U|i|c|k)", "", exec_cmd).strip()
-        os.system(f'nohup {exec_cmd} >/dev/null 2>&1 &')
+        try:
+            argv = shlex.split(exec_cmd)   # tokenize the .desktop Exec line
+        except ValueError as e:
+            return f"Could not open {app_name} ({e})."
+        if not argv or not is_safe_label(argv[0]):
+            return f"Could not open {app_name}: unusable .desktop Exec line."
+        try:
+            # replaces `nohup ... >/dev/null 2>&1 &` without involving a shell
+            subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             stdin=subprocess.DEVNULL, start_new_session=True)
+        except OSError as e:
+            return f"Could not open {app_name} ({e})."
         return f"Opened {app_name}."
-    if shutil.which(app_name.lower()):
-        os.system(f'nohup {app_name.lower()} >/dev/null 2>&1 &')
+    exe = shutil.which(app_name.lower())
+    if exe:
+        try:
+            subprocess.Popen([exe], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             stdin=subprocess.DEVNULL, start_new_session=True)
+        except OSError as e:
+            return f"Could not open {app_name} ({e})."
         return f"Opened {app_name}."
     return f"App '{app_name}' not found on the system."
 
@@ -126,6 +178,8 @@ def open_app(app_name: str) -> str:
 def close_app(app_name: str) -> str:
     if not app_name:
         return "No app name given."
+    if not is_safe_label(app_name):
+        return "Invalid application name (control characters are not allowed)."
     if IS_WINDOWS:
         exe_map = {
             "chrome": "chrome.exe", "firefox": "firefox.exe", "edge": "msedge.exe",
@@ -134,7 +188,11 @@ def close_app(app_name: str) -> str:
             "vscode": "Code.exe", "code": "Code.exe", "explorer": "explorer.exe",
         }
         exe = exe_map.get(app_name.lower(), f"{app_name}.exe")
-        os.system(f"taskkill /f /im {exe} >nul 2>&1")
+        # argument list => taskkill never sees shell syntax
+        try:
+            _run_quiet(["taskkill", "/F", "/IM", exe])
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return f"Could not close {app_name} ({e})."
         return f"Closed {app_name}."
     proc_map = {
         "chrome": "chrome", "firefox": "firefox", "edge": "microsoft-edge",
@@ -142,7 +200,10 @@ def close_app(app_name: str) -> str:
         "terminal": "kitty", "files": "nautilus", "code": "code", "vscode": "code",
     }
     proc = proc_map.get(app_name.lower(), app_name.lower())
-    os.system(f"pkill -f '{proc}'")
+    try:
+        _run_quiet(["pkill", "-f", proc])
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"Could not close {app_name} ({e})."
     return f"Closed {app_name}."
 
 
@@ -161,8 +222,12 @@ def set_volume(level: int) -> str:
         except Exception:
             return "Volume control failed."
     else:
-        os.system(f"wpctl set-volume @DEFAULT_AUDIO_SINK@ {level}%")
-        os.system("wpctl set-mute @DEFAULT_AUDIO_SINK@ 0")
+        # level is a clamped int -> the argv is fully static
+        try:
+            _run_quiet(["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", f"{level}%"], timeout=10)
+            _run_quiet(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "0"], timeout=10)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return f"Volume control failed ({e})."
     return f"Volume set to {level}%."
 
 
@@ -178,7 +243,11 @@ def mute_volume(mute: bool) -> str:
         except Exception:
             return "Volume control failed."
     else:
-        os.system(f"wpctl set-mute @DEFAULT_AUDIO_SINK@ {'1' if mute else '0'}")
+        try:
+            _run_quiet(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "1" if mute else "0"],
+                       timeout=10)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return f"Volume control failed ({e})."
     return "Muted." if mute else "Unmuted."
 
 
@@ -196,18 +265,26 @@ def volume_step(delta: int) -> str:
             return "Volume control failed."
     else:
         sign = "+" if delta > 0 else "-"
-        os.system(f"wpctl set-volume @DEFAULT_AUDIO_SINK@ {abs(delta)}%{sign}")
-        os.system("wpctl set-mute @DEFAULT_AUDIO_SINK@ 0")
+        try:
+            _run_quiet(["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", f"{abs(delta)}%{sign}"],
+                       timeout=10)
+            _run_quiet(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "0"], timeout=10)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return f"Volume control failed ({e})."
     return "Volume up." if delta > 0 else "Volume down."
 
 
 # ---------- system ----------
 
 def lock_screen() -> str:
-    if IS_WINDOWS:
-        os.system("rundll32.exe user32.dll,LockWorkStation")
-    else:
-        os.system("loginctl lock-session >/dev/null 2>&1")
+    # static argv, no shell; NOT executed during tests - it locks the session
+    try:
+        if IS_WINDOWS:
+            _run_quiet(["rundll32.exe", "user32.dll,LockWorkStation"], timeout=10)
+        else:
+            _run_quiet(["loginctl", "lock-session"], timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"Could not lock the screen ({e})."
     return "Screen locked."
 
 
@@ -219,7 +296,10 @@ def close_window() -> str:
         except Exception:
             pass
     else:
-        os.system("wmctrl -c :ACTIVE: >/dev/null 2>&1")
+        try:
+            _run_quiet(["wmctrl", "-c", ":ACTIVE:"], timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
     return "Closed the active window."
 
 
@@ -235,7 +315,10 @@ def close_tab() -> str:
             import keyboard
             keyboard.send("ctrl+w")
         except Exception:
-            os.system("wmctrl -c :ACTIVE: >/dev/null 2>&1")
+            try:
+                _run_quiet(["wmctrl", "-c", ":ACTIVE:"], timeout=10)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
     return "Closed the tab."
 
 
