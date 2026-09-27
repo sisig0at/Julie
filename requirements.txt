@@ -6,3 +6,8 @@ edge-tts>=7.2.0
 SpeechRecognition>=3.17.0
 PyAudio>=0.2.14
 PyAutoGUI>=0.9.54
+# Windows system integration: volume control through the Core Audio API
+# (both are plain pip wheels, no manual download; skipped on Linux where
+# volume uses wpctl instead)
+pycaw>=20240210; platform_system == "Windows"
+comtypes>=1.4.0; platform_system == "Windows"
