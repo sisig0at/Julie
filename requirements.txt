@@ -6,6 +6,9 @@ edge-tts>=7.2.0
 SpeechRecognition>=3.17.0
 PyAudio>=0.2.14
 PyAutoGUI>=0.9.54
+# Screenshot backend for PyAutoGUI (pyscreeze imports PIL); without it
+# analyze_screen dies with "unable to import pyscreeze". Plain pip wheel.
+Pillow>=10.0.0
 # Windows system integration: volume control through the Core Audio API
 # (both are plain pip wheels, no manual download; skipped on Linux where
 # volume uses wpctl instead)
