@@ -5,6 +5,8 @@ import os
 import sys
 import time
 import threading
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 # Windows consoles default to a legacy codepage (e.g. cp1251) which crashes
@@ -211,6 +213,11 @@ class ConfigRequest(BaseModel):
     stt_language: str | None = None     # voice input: "en" | "ru"
 
 
+class TestCloudRequest(BaseModel):
+    provider: str = ""                  # "openrouter" | "groq" | "" = from config
+    api_key: str | None = None          # key typed in the field (may be unsaved)
+
+
 @app.get("/api/health")
 async def health():
     return {"ok": True, "configured": CONFIG.is_configured()}
@@ -235,6 +242,61 @@ async def save_config(req: ConfigRequest):
     )
     core.reload_client()
     return cfg
+
+
+def _test_cloud_key(provider: str, key: str) -> dict:
+    """Light auth probe against the selected cloud provider.
+
+    OpenRouter: GET /api/v1/auth/key (cheap, returns key metadata).
+    Groq:       GET /openai/v1/models   (only HTTP status is consulted).
+    The key travels only in the Authorization header over TLS: it is never
+    printed to the log and never included in the returned JSON.
+    """
+    if provider == "ollama":
+        return {"ok": True, "message": "Ollama is local - no API key needed."}
+    if provider == "openrouter":
+        url, host = "https://openrouter.ai/api/v1/auth/key", "openrouter.ai"
+    else:
+        url, host = "https://api.groq.com/openai/v1/models", "api.groq.com"
+
+    req = urllib.request.Request(
+        url, headers={"Authorization": f"Bearer {key}", "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp.read(8192)
+    except urllib.error.HTTPError as e:
+        # Only the status code is used - response bodies are not logged.
+        if e.code == 401:
+            return {"ok": False, "message": "Invalid API key."}
+        if e.code == 402:
+            return {"ok": False, "message": "Insufficient OpenRouter credits."}
+        return {"ok": False, "message": f"{host} answered HTTP {e.code}."}
+    except Exception as e:
+        reason = str(getattr(e, "reason", "") or e).strip().splitlines()
+        return {"ok": False,
+                "message": f"Could not reach {host}: {reason[0][:120] if reason else 'network error'}"}
+    return {"ok": True, "message": f"Key is valid - {host} accepted it."}
+
+
+@app.post("/api/test_cloud")
+def test_cloud(req: TestCloudRequest):
+    """Settings TEST button: check an API key WITHOUT saving it. The key is
+    sent only to the provider; neither a log line nor the JSON response ever
+    contains it."""
+    provider = (req.provider or "").strip().lower()
+    if provider not in ("groq", "openrouter", "ollama"):
+        provider = (CONFIG.cloud_provider() if CONFIG.brain_mode() == "dual"
+                    else CONFIG.provider())
+    if provider == "ollama":
+        return {"ok": True, "message": "Ollama is local - no API key needed."}
+    key = (req.api_key or "").strip() or str(CONFIG.data.get("api_key", "")).strip()
+    if not key:
+        return {"ok": False, "message": "No API key to test - paste a key first."}
+
+    result = _test_cloud_key(provider, key)
+    # Log only the verdict - never the key itself.
+    print(f"🔑 test_cloud: {provider} → {'ok' if result['ok'] else 'failed'}", flush=True)
+    return result
 
 
 _models_cache = {"ts": 0.0, "models": []}
@@ -276,32 +338,69 @@ def _fetch_ollama_models() -> dict:
 
 
 @app.get("/api/models")
-async def get_models(provider: str = "groq"):
+async def get_models(provider: str = "groq", only_tools: bool = True):
+    """Settings dropdown model lists.
+
+    OpenRouter: the chat always uses tool-calling, so by default the list is
+    filtered to models whose `supported_parameters` include "tools" (audit
+    task 5). Per model: field present -> keep only "tools" models; field
+    absent -> the model stays (we can't know better). If the API sends no
+    supported_parameters at all, the list is returned as is and
+    "tools_filter" says "field_missing".
+    """
     if provider == "ollama":
         return _fetch_ollama_models()
     if provider == "openrouter":
         # Live fetch with a short cache so the UI dropdown is fresh but snappy
+        # (the cache holds the RAW list incl. supported_parameters; filtering
+        # happens per request so only_tools=false sees everything).
         if time.time() - _models_cache["ts"] > 300 or not _models_cache["models"]:
             models = []
             try:
-                import urllib.request, json as _json
+                import json as _json
                 with urllib.request.urlopen(
                     "https://openrouter.ai/api/v1/models", timeout=10
                 ) as resp:
                     data = _json.loads(resp.read().decode("utf-8"))
                 for m in data.get("data", []):
-                    models.append({
+                    entry = {
                         "id": m.get("id", ""),
                         "name": m.get("name", m.get("id", "")),
-                    })
+                    }
+                    params = m.get("supported_parameters")
+                    if isinstance(params, list):
+                        entry["supported_parameters"] = params
+                    models.append(entry)
                 models.sort(key=lambda m: (not m["id"].startswith("openai/"), m["id"]))
             except Exception as e:
                 print(f"⚠️ OpenRouter model fetch failed: {e}")
             _models_cache["ts"] = time.time()
             _models_cache["models"] = models or []
-        return {"models": _models_cache["models"] or [
-            {"id": m, "name": m} for m in app_config.OPENROUTER_FALLBACK_MODELS
-        ]}
+        if not _models_cache["models"]:
+            # Fetch failed (or empty catalogue): static fallback list - it has
+            # no supported_parameters, so nothing can be filtered or claimed.
+            return {"models": [
+                {"id": m, "name": m} for m in app_config.OPENROUTER_FALLBACK_MODELS
+            ], "tools_filter": "fallback"}
+        raw = _models_cache["models"]
+
+        if not only_tools:
+            return {"models": raw}
+        if not any("supported_parameters" in m for m in raw):
+            # Field not provided by this API response: keep the list and say so.
+            print("ℹ️ OpenRouter /api/v1/models has no supported_parameters - "
+                  "model list shown unfiltered")
+            return {"models": raw, "tools_filter": "field_missing"}
+        kept = [m for m in raw
+                if "supported_parameters" not in m
+                or "tools" in m["supported_parameters"]]
+        dropped = len(raw) - len(kept)
+        if dropped:
+            print(f"ℹ️ OpenRouter: hid {dropped} model(s) without tools support "
+                  "from the dropdown")
+        return {"models": [
+            {"id": m["id"], "name": m["name"]} for m in kept
+        ], "tools_filter": "applied"}
     return {"models": [{"id": m, "name": m} for m in app_config.GROQ_MODELS]}
 
 

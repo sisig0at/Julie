@@ -162,6 +162,14 @@ class AppConfig:
             return self.data.get("openrouter_model") or DEFAULT_CONFIG["openrouter_model"]
         return self.data.get("model") or DEFAULT_CONFIG["model"]
 
+    def cloud_vision_model(self) -> str:
+        """Vision model of the dual-mode cloud brain (audit §10): follows the
+        CLOUD provider, not the manual one - in dual mode the manual provider
+        may be Ollama, whose vision model the cloud client must not receive."""
+        if self.cloud_provider() == "openrouter":
+            return self.data.get("openrouter_vision") or DEFAULT_CONFIG["openrouter_vision"]
+        return self.data.get("vision_model") or DEFAULT_CONFIG["vision_model"]
+
     def local_model(self) -> str:
         """Model of the local brain (Ollama) in dual mode."""
         return self.data.get("ollama_model") or DEFAULT_CONFIG["ollama_model"]

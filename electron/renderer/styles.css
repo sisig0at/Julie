@@ -638,6 +638,33 @@ body {
 
 .key-row input { flex: 1; }
 
+/* API key column: input row on top, TEST verdict line below */
+.key-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.test-result {
+  font-size: 10px;
+  letter-spacing: .5px;
+  line-height: 1.4;
+  min-height: 12px;
+  color: var(--text-dim);
+}
+
+.test-result.ok {
+  color: var(--green);
+  text-shadow: 0 0 8px rgba(0,255,136,.35);
+}
+
+.test-result.error {
+  color: var(--red);
+  text-shadow: 0 0 8px rgba(255,86,86,.35);
+}
+
 .modal-actions {
   display: flex;
   justify-content: flex-end;

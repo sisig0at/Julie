@@ -97,9 +97,13 @@
       </div>
       <div class="form-row" id="cfg-key-row">
         <label for="cfg-key">API&nbsp;KEY</label>
-        <div class="key-row">
-          <input id="cfg-key" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false">
-          <button id="cfg-key-toggle" class="hud-btn icon-btn" title="Show / hide">&#128065;</button>
+        <div class="key-col">
+          <div class="key-row">
+            <input id="cfg-key" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false">
+            <button id="cfg-key-toggle" class="hud-btn icon-btn" title="Show / hide">&#128065;</button>
+            <button id="cfg-key-test" class="hud-btn" title="Check this key with the provider without saving it">TEST</button>
+          </div>
+          <div id="cfg-test-result" class="test-result" role="status" aria-live="polite"></div>
         </div>
       </div>
       <div class="form-row" id="cfg-model-row-groq">

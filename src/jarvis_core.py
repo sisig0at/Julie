@@ -101,6 +101,39 @@ def ollama_error_message(err: Exception) -> str:
     return ""
 
 
+def cloud_error_message(err: Exception) -> str:
+    """Short, human-readable cloud error for the chat (audit §7.1): the known
+    statuses get exact wording, everything else is one line taken from the
+    API's own message - never a stack trace, never the key itself."""
+    status = getattr(err, "status_code", None)
+    if status == 401:
+        return "Invalid API key."
+    if status == 402:
+        return "Insufficient OpenRouter credits."
+    if status == 429:
+        return ("Rate limit (free models are limited), "
+                "try again in a minute or switch model.")
+    if isinstance(err, (APIConnectionError, TimeoutError, ConnectionError)):
+        return "Cloud brain is unreachable (network error)."
+    if status:
+        first = str(getattr(err, "message", "") or "").strip().splitlines()
+        detail = first[0][:120] if first else ""
+        return f"Cloud error {status}: {detail}" if detail else f"Cloud error {status}."
+    lines = str(err).strip().splitlines()
+    return f"Cloud request failed: {lines[0][:160]}" if lines else "Cloud request failed."
+
+
+def cloud_fallback_eligible(err: Exception) -> bool:
+    """Audit §9: cloud -> local may retry ONLY for transient faults - rate
+    limits, 5xx server errors and network problems. 401/402 are configuration
+    errors (bad key / no credits): falling back would hide them behind a local
+    answer, so they must surface to the user instead."""
+    status = getattr(err, "status_code", None)
+    if status is not None:
+        return status == 429 or status >= 500
+    return isinstance(err, (APIConnectionError, TimeoutError, ConnectionError))
+
+
 AUDIO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "audio")
 os.makedirs(AUDIO_DIR, exist_ok=True)
 
@@ -378,6 +411,18 @@ ACTION_TOOLS = [
 
 
 def capture_and_analyze_screen(prompt: str) -> str:
+    # Audit §10: in dual mode screen vision belongs to the CLOUD brain
+    # (CLOUD_CLIENT + the vision model of the configured cloud provider) -
+    # not the legacy client_groq, which may point at a different provider
+    # than the routed one. Manual mode keeps the legacy client/model as is.
+    dual = CONFIG.brain_mode() == "dual"
+    if dual:
+        if not cloud_key_present():
+            return "Screen vision needs the cloud brain (no API key)"
+        vision_client, vision_model = CLOUD_CLIENT, CONFIG.cloud_vision_model()
+    else:
+        vision_client, vision_model = client_groq, ACTIVE_VISION_MODEL
+
     screenshot_path = os.path.join(AUDIO_DIR, "jarvis_vision_temp.png")
     try:
         import pyautogui  # lazy: avoids frozen-build crash (see module header)
@@ -389,8 +434,8 @@ def capture_and_analyze_screen(prompt: str) -> str:
         with open(screenshot_path, "rb") as img_file:
             base64_image = base64.b64encode(img_file.read()).decode('utf-8')
 
-        response = client_groq.chat.completions.create(
-            model=ACTIVE_VISION_MODEL,
+        response = vision_client.chat.completions.create(
+            model=vision_model,
             messages=[
                 {
                     "role": "user",
@@ -428,6 +473,11 @@ def capture_and_analyze_screen(prompt: str) -> str:
                 os.remove(screenshot_path)
             except Exception:
                 pass
+        # Dual mode: cloud API failures get the same short wording as chat
+        # (bad key / credits / rate limit) instead of a generic shrug.
+        if dual and (isinstance(e, (APIStatusError, APIConnectionError))
+                     or getattr(e, "status_code", None)):
+            return cloud_error_message(e)
         return "Vision error, boss."
 
 
@@ -564,9 +614,26 @@ async def fetch_ai_response(user_prompt: str) -> str:
                 max_tokens=400
             )
         except Exception as first_err:
+            # Audit §9 (dual mode): a TRANSIENT cloud fault (429 / 5xx /
+            # network) retries once on the local brain - the reply then
+            # carries the "[local]" tag via BRAIN_TAG/LAST_BRAIN. 401/402 are
+            # configuration errors and fall through to the handler below so
+            # the user actually sees them.
+            if (brain_tag == "[cloud]" and CONFIG.brain_mode() == "dual"
+                    and cloud_fallback_eligible(first_err)):
+                print(f"cloud unavailable → falling back to [local] ({first_err})")
+                brain_tag, client, model = "[local]", LOCAL_CLIENT, LOCAL_MODEL
+                BRAIN_TAG = LAST_BRAIN = brain_tag
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=conversation_history,
+                    tools=ACTION_TOOLS,
+                    temperature=0.6,
+                    max_tokens=400
+                )
             # Dual mode: if the local brain is down / has no model, retry once
             # with the cloud brain instead of failing the whole request.
-            if (brain_tag == "[local]" and CONFIG.brain_mode() == "dual"
+            elif (brain_tag == "[local]" and CONFIG.brain_mode() == "dual"
                     and ollama_error_message(first_err) and cloud_key_present()):
                 print(f"{brain_tag} unavailable → falling back to [cloud]: {first_err}")
                 brain_tag, client, model = "[cloud]", CLOUD_CLIENT, CLOUD_MODEL
@@ -690,6 +757,14 @@ async def fetch_ai_response(user_prompt: str) -> str:
                 return cleaned_retry
             except Exception:
                 pass
+        # Audit §7.1: cloud brains get a short human-readable message
+        # (401/402/429 worded exactly), never a stack trace. Local/manual
+        # failures keep the legacy wording below.
+        if brain_tag == "[cloud]":
+            prov = CLOUD_PROVIDER if CONFIG.brain_mode() == "dual" else ACTIVE_PROVIDER
+            print(f"❌ Cloud API Error ({prov}): {e}")
+            set_status("error", "cloud error")
+            return cloud_error_message(e)
         print(f"❌ Groq API Error: {e}")
         set_status("error", "connection error")
         return "Connection error."

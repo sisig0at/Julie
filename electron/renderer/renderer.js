@@ -94,6 +94,16 @@ const backend = {
   async models(provider) {
     const res = await this._req(`/api/models?provider=${encodeURIComponent(provider)}`, {}, true);
     return res.json();
+  },
+  // Key check for the TEST button: the (possibly unsaved) key goes only to the
+  // backend and from there to the provider - it is never logged or echoed back.
+  async testCloud(provider, apiKey) {
+    const res = await this._req('/api/test_cloud', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider, api_key: apiKey || null })
+    }, true);
+    return res.json();
   }
 };
 
@@ -382,6 +392,8 @@ const cfgBrainMode = $('cfg-brain-mode');
 const cfgKey = $('cfg-key');
 const cfgKeyRow = $('cfg-key-row');
 const cfgKeyToggle = $('cfg-key-toggle');
+const cfgKeyTest = $('cfg-key-test');
+const cfgTestResult = $('cfg-test-result');
 const cfgModel = $('cfg-model');
 const cfgModelOr = $('cfg-model-or');
 const cfgModelOllama = $('cfg-model-ollama');
@@ -460,6 +472,7 @@ async function refreshForm(cfg) {
   const isOllama = !dual && provider === 'ollama';
 
   setCfgStatus('', false);
+  clearTestResult();
 
   // In dual mode PROVIDER selects the CLOUD brain, so Ollama can't be picked
   // there (the local brain is always Ollama and gets its own MODEL row).
@@ -513,6 +526,34 @@ cfgKeyToggle.addEventListener('click', () => {
   const show = cfgKey.type === 'password';
   cfgKey.type = show ? 'text' : 'password';
 });
+
+function clearTestResult() {
+  cfgTestResult.textContent = '';
+  cfgTestResult.className = 'test-result';
+}
+
+/* TEST: probe the key against the selected cloud provider WITHOUT saving it.
+   The verdict shows up green (ok) / red (failed) right under the input. */
+cfgKeyTest.addEventListener('click', async () => {
+  const dual = cfgBrainMode.value === 'dual';
+  if (dual && cloudProviderSel === 'ollama') cloudProviderSel = 'groq';
+  const provider = dual ? cloudProviderSel : manualProvider;
+  cfgTestResult.textContent = 'TESTING KEY...';
+  cfgTestResult.className = 'test-result';
+  cfgKeyTest.disabled = true;
+  try {
+    const r = await backend.testCloud(provider, cfgKey.value.trim() || null);
+    cfgTestResult.textContent = r.message || (r.ok ? 'KEY IS VALID' : 'KEY CHECK FAILED');
+    cfgTestResult.className = r.ok ? 'test-result ok' : 'test-result error';
+  } catch (e) {
+    cfgTestResult.textContent = `TEST FAILED: ${e.message}`;
+    cfgTestResult.className = 'test-result error';
+  } finally {
+    cfgKeyTest.disabled = false;
+  }
+});
+
+cfgKey.addEventListener('input', clearTestResult);
 
 gearBtn.addEventListener('click', () => openSettings(false));
 $('btn-settings-close').addEventListener('click', closeSettings);
